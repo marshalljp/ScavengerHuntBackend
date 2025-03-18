@@ -1,0 +1,6 @@
+@ScavengerHuntBackend_HostAddress = http://localhost:5230
+
+GET {{ScavengerHuntBackend_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
