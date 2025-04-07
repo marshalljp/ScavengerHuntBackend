@@ -113,7 +113,6 @@ namespace ScavengerHuntBackend.Controllers
         [HttpPost("approve")]
         public async Task<IActionResult> TeamRequestApprove([FromBody] ApproveTeamRequest request)
         {
-            var email = CommonUtils.GetUserEmail(User);
             var userId = CommonUtils.GetUserID(User, _configuration);
             var teamId = CommonUtils.GetTeamUserID(User, _configuration);
             int NewTeamUserId = request.NewTeamUserId;
