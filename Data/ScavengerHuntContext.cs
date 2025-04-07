@@ -14,7 +14,8 @@ namespace ScavengerHuntBackend
         public DbSet<Submission> Submissions { get; set; }
         public DbSet<Leaderboard> Leaderboards { get; set; }
         public DbSet<ScavengerHuntSession> ScavengerHuntSessions { get; set; }
-
+        
+        /* 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             modelBuilder.Entity<Group>()
@@ -22,10 +23,10 @@ namespace ScavengerHuntBackend
                 .WithOne(t => t.Group)
                 .HasForeignKey(t => t.GroupId);
 
-            modelBuilder.Entity<Team>()
-                .HasMany(t => t.Users)
-                .WithOne(u => u.Team)
-                .HasForeignKey(u => u.TeamId);
+        //    modelBuilder.Entity<Team>()
+          //      .HasMany(t => t.Users)
+            //    .WithOne(u => u.Email)
+              //  .HasForeignKey(u => u.TeamId);
 
             modelBuilder.Entity<ScavengerHuntSession>()
                 .HasMany(s => s.Puzzles)
@@ -42,5 +43,7 @@ namespace ScavengerHuntBackend
                 .WithMany()
                 .HasForeignKey(s => s.PuzzleId);
         }
+        */
     }
+
 }

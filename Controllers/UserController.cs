@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace ScavengerHuntBackend.Controllers
 {
-    [Route("api/users")]
+    [Route("users")]
     [ApiController]
     //[Authorize]
     public class UserController : ControllerBase
@@ -22,7 +22,7 @@ namespace ScavengerHuntBackend.Controllers
         public async Task<IActionResult> GetProfile()
         {
             var email = User.Identity.Name;
-            var user = await _context.Users.Include(u => u.Team).FirstOrDefaultAsync(u => u.Email == email);
+            var user = await _context.Users.Include(u => u.Email).FirstOrDefaultAsync(u => u.Email == email);
 
             if (user == null)
                 return NotFound("User not found.");
@@ -31,7 +31,7 @@ namespace ScavengerHuntBackend.Controllers
             {
                 user.Id,
                 user.Email,
-                Team = user.Team != null ? new { user.Team.Id, user.Team.Name } : null
+                //Team = user.Team != null ? new { user.Team.Id, user.Team.Name } : null
             });
         }
 
@@ -45,7 +45,7 @@ namespace ScavengerHuntBackend.Controllers
             var team = await _context.Teams.FirstOrDefaultAsync(t => t.Id == teamId);
             if (team == null) return NotFound("Team not found.");
 
-            user.TeamId = teamId;
+            //user.TeamId = teamId;
             await _context.SaveChangesAsync();
 
             return Ok("Successfully joined the team.");

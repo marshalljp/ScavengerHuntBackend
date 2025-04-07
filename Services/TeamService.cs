@@ -21,7 +21,7 @@ namespace ScavengerHuntBackend.Services
             if (team == null || user == null)
                 return false;
 
-            user.TeamId = teamId;
+            //user.TeamId = teamId;
             await _context.SaveChangesAsync();
             return true;
         }

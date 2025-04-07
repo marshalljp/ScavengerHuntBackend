@@ -11,7 +11,7 @@ using ScavengerHuntBackend.Models;
 
 namespace ScavengerHuntBackend.Controllers
 {
-    [Route("api/groups")]
+    [Route("groups")]
     [ApiController]
     //[Authorize]
     public class GroupController : ControllerBase
