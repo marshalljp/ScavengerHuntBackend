@@ -33,7 +33,8 @@ namespace ScavengerHuntBackend.Controllers
             try
             {
 
-
+                int teamId = Int32.Parse(CommonUtils.GetTeamUserID(User, _configuration));
+                int userId = Int32.Parse(CommonUtils.GetUserID(User, _configuration));
                 var connString = _configuration.GetConnectionString("DefaultConnection");
                 var puzzles = new List<Dictionary<string, object>>();
                 var progressList = new List<Dictionary<string, object>>();
@@ -68,7 +69,14 @@ namespace ScavengerHuntBackend.Controllers
                     using (MySqlCommand cmd = conn.CreateCommand())
                     {
                         cmd.CommandType = CommandType.Text;
-                        cmd.CommandText = "SELECT * FROM scavengerhunt.puzzleprogress;";
+                        if(teamId != 9999) { 
+                            cmd.CommandText = "SELECT * FROM scavengerhunt.puzzleprogress WHERE team_id = @teamId";
+                            cmd.Parameters.AddWithValue("@teamId", teamId);
+                        } else
+                        {
+                            cmd.CommandText = "SELECT * FROM scavengerhunt.puzzleprogress WHERE user_id = @teamId";
+                            cmd.Parameters.AddWithValue("@teamId", userId);
+                        }
                         using (var rdr = await cmd.ExecuteReaderAsync())
                         {
                             while (await rdr.ReadAsync())
@@ -94,7 +102,7 @@ namespace ScavengerHuntBackend.Controllers
                     // Adjust the matching condition as needed.
                     var puzzleId = puzzle["Id"]?.ToString();
                     var progressRecord = progressList.FirstOrDefault(
-                        pr => pr["id"]?.ToString() == puzzleId);
+                        pr => pr["puzzle_id"]?.ToString() == puzzleId);
 
                     if (progressRecord != null)
                     {
@@ -135,7 +143,7 @@ namespace ScavengerHuntBackend.Controllers
             {
                 var email = CommonUtils.GetUserEmail(User);
                 var userId = CommonUtils.GetUserID(User, _configuration);
-
+                int teamId = Int32.Parse(CommonUtils.GetTeamUserID(User, _configuration));
                 var connString = _configuration.GetConnectionString("DefaultConnection");
                 Dictionary<string, object> mainPuzzle = null;
                 var subpuzzles = new List<Dictionary<string, object>>();
@@ -191,9 +199,17 @@ namespace ScavengerHuntBackend.Controllers
                     // Query 3: Get puzzle progress for the user.
                     using (MySqlCommand cmd = conn.CreateCommand())
                     {
-                        cmd.CommandType = CommandType.Text;
-                        cmd.CommandText = "SELECT * FROM scavengerhunt.puzzleprogress WHERE user_id = @userid;";
-                        cmd.Parameters.AddWithValue("@userid", userId);
+                        if (teamId != 9999)
+                        {
+                            cmd.CommandText = "SELECT * FROM scavengerhunt.puzzleprogress WHERE team_id = @teamId";
+                            cmd.Parameters.AddWithValue("@teamId", teamId);
+                        }
+                        else
+                        {
+                            cmd.CommandText = "SELECT * FROM scavengerhunt.puzzleprogress WHERE user_id = @teamId";
+                            cmd.Parameters.AddWithValue("@teamId", userId);
+                        }
+
                         using (var rdr = await cmd.ExecuteReaderAsync())
                         {
                             while (await rdr.ReadAsync())
@@ -221,7 +237,7 @@ namespace ScavengerHuntBackend.Controllers
                 // Merge progress data into main puzzle if available.
                 var puzzleIdStr = mainPuzzle["Id"]?.ToString();
                 var progressRecord = progressList.FirstOrDefault(
-                    pr => pr["id"]?.ToString() == puzzleIdStr);
+                    pr => pr["puzzle_id"]?.ToString() == puzzleIdStr);
                 if (progressRecord != null)
                 {
                     foreach (var kv in progressRecord)
@@ -256,7 +272,7 @@ namespace ScavengerHuntBackend.Controllers
             // Get user information (if needed)
             var email = CommonUtils.GetUserEmail(User);
             var userId = CommonUtils.GetUserID(User, _configuration);
-
+            var teamId = CommonUtils.GetTeamUserID(User, _configuration);
             string storedHash = null;
             string message = null;
             var connString = _configuration.GetConnectionString("DefaultConnection");
@@ -314,7 +330,7 @@ namespace ScavengerHuntBackend.Controllers
                         cmd.Parameters.AddWithValue("@progress", 10);
                         cmd.Parameters.AddWithValue("@is_completed", 0);
                         cmd.Parameters.AddWithValue("@status", "in-progress");
-                        cmd.Parameters.AddWithValue("@team_id", 0);
+                        cmd.Parameters.AddWithValue("@team_id", teamId);
                         await cmd.ExecuteNonQueryAsync();
                     }
                 }
