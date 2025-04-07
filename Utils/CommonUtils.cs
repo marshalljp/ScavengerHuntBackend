@@ -94,10 +94,11 @@ namespace ScavengerHuntBackend.Utils
                     cmd.Parameters.AddWithValue("@email", email);
 
                     object result = cmd.ExecuteScalar();
-                    if (result == null || result == DBNull.Value)
-                        throw new Exception("User not found.");
-
-                    userId = Convert.ToInt32(result);
+                    if (result == null || result == DBNull.Value) { 
+                        userId = 9999;
+                    } else { 
+                        userId = Convert.ToInt32(result);
+                    }
                 }
             }
 
