@@ -287,7 +287,7 @@ namespace ScavengerHuntBackend.Controllers
                         SELECT AnswerHash, message
                         FROM scavengerhunt.puzzlesdetails
                         WHERE puzzleid = @puzzleId
-                          AND id = @subpuzzleId
+                          AND puzzleidorder = @subpuzzleId
                         LIMIT 1;";
                     cmd.Parameters.AddWithValue("@puzzleId", submission.puzzleId);
                     cmd.Parameters.AddWithValue("@subpuzzleId", submission.subpuzzleId);
@@ -321,9 +321,13 @@ namespace ScavengerHuntBackend.Controllers
                     {
                         cmd.CommandType = CommandType.Text;
                         cmd.CommandText = @"
-                    INSERT INTO puzzleprogress (user_id, puzzle_id, progress, is_completed, status, team_id, puzzleidorder)
-                    VALUES (@userId, @puzzleId, @progress, @is_completed, @status, @team_id, @puzzleidorder)
-                    ON DUPLICATE KEY UPDATE progress = @progress, is_completed = @is_completed, status = @status, team_id = @team_id;";
+                            UPDATE puzzleprogress
+                            SET progress = @progress,
+                                is_completed = @is_completed,
+                                status = @status,
+                                team_id = @team_id
+                            WHERE user_id = @userId
+                              AND puzzle_id = @puzzleId AND puzzleidorder = @puzzleidorder AND user_id = @userId;";
                         cmd.Parameters.AddWithValue("@userId", userId);
                         cmd.Parameters.AddWithValue("@puzzleId", submission.puzzleId);
                         cmd.Parameters.AddWithValue("@puzzleidorder", submission.subpuzzleId);

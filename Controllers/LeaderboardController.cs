@@ -45,7 +45,7 @@ namespace ScavengerHuntBackend.Controllers
                           pp.team_id,
                           pp.puzzle_id,
                           p.Title,
-                          MAX(
+                          SUM(
                             CASE 
                               WHEN pp.is_completed = 1 THEN pp.progress + 20
                               ELSE pp.progress 
@@ -84,7 +84,7 @@ namespace ScavengerHuntBackend.Controllers
                         SELECT t.Id AS team_id, t.Name AS team_name, SUM(progress_per_puzzle) AS team_score
                         FROM (
                             SELECT team_id, puzzle_id,
-                                   MAX(
+                                   SUM(
                                        CASE 
                                            WHEN is_completed = 1 THEN progress + 20
                                            ELSE progress 
