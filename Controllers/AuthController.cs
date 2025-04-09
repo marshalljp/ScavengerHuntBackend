@@ -11,6 +11,7 @@ using ScavengerHuntBackend.Models;
 using MySqlConnector;
 using System.Net;
 using System.Xml;
+using System.Data;
 
 
 namespace ScavengerHuntBackend.Controllers
@@ -87,14 +88,16 @@ namespace ScavengerHuntBackend.Controllers
                             // NOTE: Adjust the source and destination table names as needed.
                             // Here we assume the old table is named "old_puzzleprogress" and the new table is "puzzleprogress".
                             // ---
+                            cmd.CommandType = CommandType.Text;
                             cmd.CommandText =
-                                "INSERT INTO puzzleprogress (user_id, puzzle_id, team_id) " +
-                                "SELECT @NewUserId, id, @teamId " +
-                                "FROM puzzles";
+                                "INSERT INTO puzzleprogress (user_id, puzzle_id, team_id, puzzleidorder) " +
+                                "SELECT @NewUserId, puzzleid, @teamId, puzzleidorder " +
+                                "FROM puzzlesdetails;";
                             cmd.Parameters.Clear();
                             cmd.Parameters.AddWithValue("@NewUserId", newUserId);
                             cmd.Parameters.AddWithValue("@teamId", teamId);
-                            cmd.ExecuteNonQuery();
+                            await cmd.ExecuteNonQueryAsync();
+                            
 
                             // Mark the access code as used.
                             cmd.CommandText = "UPDATE AccessCodes SET Used = 1 WHERE AccessCode = @AccessCode";
