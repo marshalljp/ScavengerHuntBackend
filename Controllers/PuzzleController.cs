@@ -319,15 +319,24 @@ namespace ScavengerHuntBackend.Controllers
                     await conn.OpenAsync();
                     using (MySqlCommand cmd = conn.CreateCommand())
                     {
-                        cmd.CommandType = CommandType.Text;
                         cmd.CommandText = @"
-                            UPDATE puzzleprogress
-                            SET progress = @progress,
+                            UPDATE puzzleprogress AS pp
+                            SET progress = @progress +
+                                (CASE 
+                                    WHEN (
+                                        SELECT IFNULL(SUM(p.progress), 0)
+                                        FROM (SELECT * FROM puzzleprogress) AS p
+                                        WHERE p.puzzle_id = @puzzleId
+                                          AND p.puzzleidorder = @puzzleidorder
+                                          AND p.id <> pp.id
+                                    ) = 0 THEN 10 ELSE 0 END),
                                 is_completed = @is_completed,
                                 status = @status,
                                 team_id = @team_id
                             WHERE user_id = @userId
-                              AND puzzle_id = @puzzleId AND puzzleidorder = @puzzleidorder AND user_id = @userId;";
+                              AND puzzle_id = @puzzleId
+                              AND puzzleidorder = @puzzleidorder;";
+                        cmd.Parameters.Clear();
                         cmd.Parameters.AddWithValue("@userId", userId);
                         cmd.Parameters.AddWithValue("@puzzleId", submission.puzzleId);
                         cmd.Parameters.AddWithValue("@puzzleidorder", submission.subpuzzleId);
@@ -336,6 +345,7 @@ namespace ScavengerHuntBackend.Controllers
                         cmd.Parameters.AddWithValue("@status", "in-progress");
                         cmd.Parameters.AddWithValue("@team_id", teamId);
                         await cmd.ExecuteNonQueryAsync();
+
                     }
                 }
                 return Ok(new { correct = submission.IsCorrect, message = message });
