@@ -32,22 +32,53 @@ namespace ScavengerHuntBackend.Controllers
         {
             try
             {
-
                 int teamId = Int32.Parse(CommonUtils.GetTeamUserID(User, _configuration));
                 int userId = Int32.Parse(CommonUtils.GetUserID(User, _configuration));
                 var connString = _configuration.GetConnectionString("DefaultConnection");
                 var puzzles = new List<Dictionary<string, object>>();
-                var progressList = new List<Dictionary<string, object>>();
 
                 using (MySqlConnection conn = new MySqlConnection(connString))
                 {
                     await conn.OpenAsync();
-
-                    // Query 1: Get puzzles.
                     using (MySqlCommand cmd = conn.CreateCommand())
                     {
                         cmd.CommandType = CommandType.Text;
-                        cmd.CommandText = "SELECT * FROM scavengerhunt.puzzles;";
+                        if (teamId != 9999)
+                        {
+                            // For team-based queries: join using team_id and aggregate progress.
+                            cmd.CommandText = @"
+                                SELECT 
+                                    p.Title,
+                                    p.Id as Id,
+                                    COALESCE(SUM(pp.progress), 0) AS progress,
+                                    CASE 
+                                        WHEN COUNT(pp.puzzle_id) = 0 THEN 'not-started'
+                                        ELSE MAX(pp.status)
+                                    END AS status
+                                FROM scavengerhunt.puzzles AS p
+                                LEFT JOIN scavengerhunt.puzzleprogress AS pp 
+                                    ON p.id = pp.puzzle_id AND pp.team_id = @teamId
+                                GROUP BY p.id, p.Title";
+                            cmd.Parameters.AddWithValue("@teamId", teamId);
+                        }
+                        else
+                        {
+                            // For user-based queries: join using user_id and aggregate progress.
+                            cmd.CommandText = @"
+                                SELECT 
+                                    p.Title,
+                                    p.Id as Id,
+                                    COALESCE(SUM(pp.progress), 0) AS progress,
+                                    CASE 
+                                        WHEN COUNT(pp.puzzle_id) = 0 THEN 'not-started'
+                                        ELSE MAX(pp.status)
+                                    END AS status
+                                FROM scavengerhunt.puzzles AS p
+                                LEFT JOIN scavengerhunt.puzzleprogress AS pp 
+                                    ON p.id = pp.puzzle_id AND pp.user_id = @userId
+                                GROUP BY p.id, p.Title";
+                            cmd.Parameters.AddWithValue("@userId", userId);
+                        }
 
                         using (var rdr = await cmd.ExecuteReaderAsync())
                         {
@@ -64,63 +95,8 @@ namespace ScavengerHuntBackend.Controllers
                             }
                         }
                     }
-
-                    // Query 2: Get puzzle progress.
-                    using (MySqlCommand cmd = conn.CreateCommand())
-                    {
-                        cmd.CommandType = CommandType.Text;
-                        if(teamId != 9999) { 
-                            cmd.CommandText = "SELECT * FROM scavengerhunt.puzzleprogress WHERE team_id = @teamId";
-                            cmd.Parameters.AddWithValue("@teamId", teamId);
-                        } else
-                        {
-                            cmd.CommandText = "SELECT * FROM scavengerhunt.puzzleprogress WHERE user_id = @teamId";
-                            cmd.Parameters.AddWithValue("@teamId", userId);
-                        }
-                        using (var rdr = await cmd.ExecuteReaderAsync())
-                        {
-                            while (await rdr.ReadAsync())
-                            {
-                                var progressDetail = new Dictionary<string, object>();
-                                for (int i = 0; i < rdr.FieldCount; i++)
-                                {
-                                    string columnName = rdr.GetName(i);
-                                    object columnValue = rdr.GetValue(i);
-                                    progressDetail[columnName] = columnValue;
-                                }
-                                progressList.Add(progressDetail);
-                            }
-                        }
-                    }
-
                     await conn.CloseAsync();
                 }
-
-                foreach (var puzzle in puzzles)
-                {
-                    // Assuming puzzles table has "Id" and puzzleprogress table has a field (e.g. "id" or "puzzle_id") that can be matched.
-                    // Adjust the matching condition as needed.
-                    var puzzleId = puzzle["Id"]?.ToString();
-                    var progressRecord = progressList.FirstOrDefault(
-                        pr => pr["puzzle_id"]?.ToString() == puzzleId);
-
-                    if (progressRecord != null)
-                    {
-                        // Merge each key-value pair from progressRecord into the puzzle dictionary.
-                        foreach (var kv in progressRecord)
-                        {
-                            puzzle[kv.Key] = kv.Value;
-                        }
-                    }
-                    else
-                    {
-                        // No progress record found: set default values.
-                        puzzle["status"] = "not-started";
-                        puzzle["progress"] = 0;
-                    }
-                }
-
-                // Return the combined puzzles object in a JSON object.
                 return Ok(new { success = true, puzzles = puzzles });
             }
             catch (Exception ex)
