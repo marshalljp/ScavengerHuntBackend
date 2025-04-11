@@ -78,6 +78,7 @@ namespace ScavengerHuntBackend.Services
             return Ok(notifications);
         }
 
+
     }
 
     /// <summary>

@@ -1,7 +1,10 @@
 using Microsoft.Extensions.Configuration;
 using MySqlConnector;
+using ScavengerHuntBackend.Models;
 using System;
+using System.Data;
 using System.Security.Claims;
+using static ScavengerHuntBackend.Services.NotificationController;
 
 namespace ScavengerHuntBackend.Utils
 {
@@ -105,24 +108,84 @@ namespace ScavengerHuntBackend.Utils
             return userId.ToString();
         }
 
-        public static string AddNotification(ClaimsPrincipal user, IConfiguration configuration)
+        public static bool AddNotification(ClaimsPrincipal user, IConfiguration _configuration, string message)
         {
-            string userId = "";
-            var connString = configuration.GetConnectionString("DefaultConnection");
-            using (MySqlConnection conn = new MySqlConnection(connString))
+            var email = CommonUtils.GetUserEmail(user);
+            var userId = CommonUtils.GetUserID(user, _configuration);
+            var teamId = CommonUtils.GetTeamUserID(user, _configuration);
+            var notifications = new List<Notification>();
+            var notificationIds = new List<int>();
+            var connString = _configuration.GetConnectionString("DefaultConnection");
+            using (var conn = new MySqlConnection(connString))
             {
-                using (MySqlCommand cmd = conn.CreateCommand())
+                conn.OpenAsync();
+                // Begin a transaction so that reading and writing is atomic.
+                using (var transaction = conn.BeginTransaction())
                 {
-                    conn.Open();
+                    try
+                    {
+                        // Get all user IDs from the users table for the specified team.
+                        var teamUserIds = new List<int>();
+                        using (var selectCmd = conn.CreateCommand())
+                        {
+                            selectCmd.Transaction = transaction;
+                            selectCmd.CommandType = CommandType.Text;
+                            selectCmd.CommandText = "SELECT Id FROM users WHERE TeamId = @TeamId;";
+                            selectCmd.Parameters.AddWithValue("@TeamId", teamId);
 
-                    cmd.CommandText = "INSERT INTO notifications (user_id, message, action, teamUserId) VALUES (@UserId, @Message, 1, @teamUserId);";
-                    //cmd.Parameters.AddWithValue("@UserId", targetUserId);
-                    //cmd.Parameters.AddWithValue("@teamUserId", userId);
-                    cmd.ExecuteNonQuery();
+                            using (var reader = selectCmd.ExecuteReader())
+                            {
+                                while (reader.Read())
+                                {
+                                    teamUserIds.Add(reader.GetInt32("Id"));
+                                }
+                            }
+                        }
+
+                        // For each user in the team, insert a notification.
+                        foreach (var targetUserId in teamUserIds)
+                        {
+                            using (var insertCmd = conn.CreateCommand())
+                            {
+                                insertCmd.Transaction = transaction;
+                                insertCmd.CommandType = CommandType.Text;
+                                insertCmd.CommandText = "INSERT INTO notifications (user_id, message, action, teamUserId) VALUES (@UserId, @Message, 1, @teamUserId);";
+                                insertCmd.Parameters.AddWithValue("@UserId", targetUserId);
+                                insertCmd.Parameters.AddWithValue("@Message", message);
+                                insertCmd.Parameters.AddWithValue("@teamUserId", userId);
+                                insertCmd.ExecuteNonQuery();
+                            }
+                        }
+
+                        // Optionally, update the user's team assignment in your users table.
+                        // You might want to add logic here to assign the user to the team if that is part of your flow.
+
+                        // Commit the transaction.
+                        transaction.Commit();
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        // Rollback if any error occurs.
+                        transaction.Rollback();
+                        return false;
+                    }
                 }
             }
 
-            return userId;
         }
+
+
+    }
+
+    public class Notification
+    {
+        public int Id { get; set; }
+        public int UserId { get; set; }
+        public string Message { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public bool Seen { get; set; }
+        public int Action { get; set; }
+        public int TeamUserId { get; set; }
     }
 }
