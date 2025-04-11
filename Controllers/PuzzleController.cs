@@ -331,6 +331,101 @@ namespace ScavengerHuntBackend.Controllers
 
             return Ok(new { correct = submission.IsCorrect });
         }
+        [HttpGet("gs/{id}")]
+        public async Task<IActionResult> GS(int id)
+        {
+            try
+            {
+                var email = CommonUtils.GetUserEmail(User);
+                var userId = CommonUtils.GetUserID(User, _configuration);
+                int teamId = Int32.Parse(CommonUtils.GetTeamUserID(User, _configuration));
+                var connString = _configuration.GetConnectionString("DefaultConnection");
+
+                // Flag to determine if any progress rows were returned.
+                bool foundProgressRow = false;
+
+                using (MySqlConnection conn = new MySqlConnection(connString))
+                {
+                    await conn.OpenAsync();
+
+                    // Query the progress values.
+                    using (MySqlCommand cmd = conn.CreateCommand())
+                    {
+                        cmd.CommandType = CommandType.Text;
+                        cmd.CommandText = @"
+                    SELECT progress 
+                    FROM scavengerhunt.puzzleprogress 
+                    JOIN puzzlesdetails 
+                      ON puzzlesdetails.puzzleidorder = puzzleprogress.puzzleidorder 
+                    WHERE user_id = @userId 
+                      AND requiredForSeed = 1";
+                        cmd.Parameters.AddWithValue("@userId", userId);
+
+                        using (var rdr = await cmd.ExecuteReaderAsync())
+                        {
+                            while (await rdr.ReadAsync())
+                            {
+                                foundProgressRow = true;
+                                int progressIndex = rdr.GetOrdinal("progress");
+                                // Check if the progress field is null.
+                                if (rdr.IsDBNull(progressIndex))
+                                {
+                                    return Ok(new { success = false, message = "Progress value missing" });
+                                }
+
+                                int progressValue = rdr.GetInt32(progressIndex);
+                                // If any progress value is 0, progress is incomplete.
+                                if (progressValue == 0)
+                                {
+                                    return Ok(new { success = false, message = "Progress incomplete" });
+                                }
+                            }
+                        }
+                    }
+
+                    // If no rows were returned, then there are no progress records—so progress is incomplete.
+                    if (!foundProgressRow)
+                    {
+                        return Ok(new { success = false, message = "Progress incomplete: no progress records found" });
+                    }
+
+                    // If progress exists and is complete (nonzero), retrieve the seed word.
+                    string seed = null;
+                    using (MySqlCommand cmd = conn.CreateCommand())
+                    {
+                        cmd.CommandType = CommandType.Text;
+                        cmd.CommandText = "SELECT seed FROM scavengerhunt.seeds WHERE puzzle_id = @id";
+                        cmd.Parameters.AddWithValue("@id", id);
+
+                        using (var rdr = await cmd.ExecuteReaderAsync())
+                        {
+                            if (await rdr.ReadAsync())
+                            {
+                                seed = rdr["seed"]?.ToString();
+                            }
+                        }
+                    }
+
+                    await conn.CloseAsync();
+
+                    if (!string.IsNullOrEmpty(seed))
+                    {
+                        return Ok(new { success = true, seed = seed });
+                    }
+                    else
+                    {
+                        return Ok(new { success = false, message = "Seed not found." });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+        }
+
 
     }
+
+
 }
