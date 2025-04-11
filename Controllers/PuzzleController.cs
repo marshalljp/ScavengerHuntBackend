@@ -336,9 +336,25 @@ namespace ScavengerHuntBackend.Controllers
                         cmd.Parameters.AddWithValue("@status", "in-progress");
                         cmd.Parameters.AddWithValue("@team_id", teamId);
                         await cmd.ExecuteNonQueryAsync();
-                        if(GS_internal(submission.puzzleId))
+                        if(CommonUtils.GS_internal(User, _configuration, submission.puzzleId))
                         {
-                            CommonUtils.AddNotification(User, _configuration, "dsadasd");
+                            string seed = null;
+                            using (MySqlCommand cmd1 = conn.CreateCommand())
+                            {
+                                cmd1.CommandType = CommandType.Text;
+                                cmd1.CommandText = "SELECT seed FROM scavengerhunt.seeds WHERE puzzle_id = @id";
+                                cmd1.Parameters.AddWithValue("@id", submission.puzzleId);
+
+                                using (var rdr1 = cmd1.ExecuteReader())
+                                {
+                                    if (rdr1.Read())
+                                    {
+                                        seed = rdr1["seed"]?.ToString();
+                                    }
+                                }
+                            }
+
+                            CommonUtils.AddNotification(User, _configuration, "You have unlocked an seed word: " + seed);
                         }
                     }
                 }
@@ -443,97 +459,7 @@ namespace ScavengerHuntBackend.Controllers
         }
 
 
-        public bool GS_internal(int id)
-        {
-            try
-            {
-                var email = CommonUtils.GetUserEmail(User);
-                var userId = CommonUtils.GetUserID(User, _configuration);
-                int teamId = Int32.Parse(CommonUtils.GetTeamUserID(User, _configuration));
-                var connString = _configuration.GetConnectionString("DefaultConnection");
 
-                // Flag to determine if any progress rows were returned.
-                bool foundProgressRow = false;
-
-                using (MySqlConnection conn = new MySqlConnection(connString))
-                {
-                    conn.Open();
-
-                    // Query the progress values.
-                    using (MySqlCommand cmd = conn.CreateCommand())
-                    {
-                        cmd.CommandType = CommandType.Text;
-                        cmd.CommandText = @"
-                    SELECT progress 
-                    FROM scavengerhunt.puzzleprogress 
-                    JOIN puzzlesdetails 
-                      ON puzzlesdetails.puzzleidorder = puzzleprogress.puzzleidorder 
-                    WHERE user_id = @userId 
-                      AND requiredForSeed = 1";
-                        cmd.Parameters.AddWithValue("@userId", userId);
-
-                        using (var rdr = cmd.ExecuteReader())
-                        {
-                            while (rdr.Read())
-                            {
-                                foundProgressRow = true;
-                                int progressIndex = rdr.GetOrdinal("progress");
-                                // Check if the progress field is null.
-                                if (rdr.IsDBNull(progressIndex))
-                                {
-                                    return false;
-                                }
-
-                                int progressValue = rdr.GetInt32(progressIndex);
-                                // If any progress value is 0, progress is incomplete.
-                                if (progressValue == 0)
-                                {
-                                    return false;
-                                }
-                            }
-                        }
-                    }
-
-                    // If no rows were returned, then there are no progress records—so progress is incomplete.
-                    if (!foundProgressRow)
-                    {
-                        return false;
-                    }
-
-                    // If progress exists and is complete (nonzero), retrieve the seed word.
-                    string seed = null;
-                    using (MySqlCommand cmd = conn.CreateCommand())
-                    {
-                        cmd.CommandType = CommandType.Text;
-                        cmd.CommandText = "SELECT seed FROM scavengerhunt.seeds WHERE puzzle_id = @id";
-                        cmd.Parameters.AddWithValue("@id", id);
-
-                        using (var rdr = cmd.ExecuteReader())
-                        {
-                            if (rdr.Read())
-                            {
-                                seed = rdr["seed"]?.ToString();
-                            }
-                        }
-                    }
-
-                    conn.Close();
-
-                    if (!string.IsNullOrEmpty(seed))
-                    {
-                        return true;
-                    }
-                    else
-                    {
-                        return false;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                return false;
-            }
-        }
 
     }
 

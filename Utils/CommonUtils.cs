@@ -175,7 +175,97 @@ namespace ScavengerHuntBackend.Utils
 
         }
 
+        public static bool GS_internal(ClaimsPrincipal user, IConfiguration _configuration, int id)
+        {
+            try
+            {
+                var email = CommonUtils.GetUserEmail(user);
+                var userId = CommonUtils.GetUserID(user, _configuration);
+                int teamId = Int32.Parse(CommonUtils.GetTeamUserID(user, _configuration));
+                var connString = _configuration.GetConnectionString("DefaultConnection");
 
+                // Flag to determine if any progress rows were returned.
+                bool foundProgressRow = false;
+
+                using (MySqlConnection conn = new MySqlConnection(connString))
+                {
+                    conn.Open();
+
+                    // Query the progress values.
+                    using (MySqlCommand cmd = conn.CreateCommand())
+                    {
+                        cmd.CommandType = CommandType.Text;
+                        cmd.CommandText = @"
+                    SELECT progress 
+                    FROM scavengerhunt.puzzleprogress 
+                    JOIN puzzlesdetails 
+                      ON puzzlesdetails.puzzleidorder = puzzleprogress.puzzleidorder 
+                    WHERE user_id = @userId 
+                      AND requiredForSeed = 1";
+                        cmd.Parameters.AddWithValue("@userId", userId);
+
+                        using (var rdr = cmd.ExecuteReader())
+                        {
+                            while (rdr.Read())
+                            {
+                                foundProgressRow = true;
+                                int progressIndex = rdr.GetOrdinal("progress");
+                                // Check if the progress field is null.
+                                if (rdr.IsDBNull(progressIndex))
+                                {
+                                    return false;
+                                }
+
+                                int progressValue = rdr.GetInt32(progressIndex);
+                                // If any progress value is 0, progress is incomplete.
+                                if (progressValue == 0)
+                                {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+
+                    // If no rows were returned, then there are no progress records—so progress is incomplete.
+                    if (!foundProgressRow)
+                    {
+                        return false;
+                    }
+
+                    // If progress exists and is complete (nonzero), retrieve the seed word.
+                    string seed = null;
+                    using (MySqlCommand cmd = conn.CreateCommand())
+                    {
+                        cmd.CommandType = CommandType.Text;
+                        cmd.CommandText = "SELECT seed FROM scavengerhunt.seeds WHERE puzzle_id = @id";
+                        cmd.Parameters.AddWithValue("@id", id);
+
+                        using (var rdr = cmd.ExecuteReader())
+                        {
+                            if (rdr.Read())
+                            {
+                                seed = rdr["seed"]?.ToString();
+                            }
+                        }
+                    }
+
+                    conn.Close();
+
+                    if (!string.IsNullOrEmpty(seed))
+                    {
+                        return true;
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                return false;
+            }
+        }
     }
 
     public class Notification
