@@ -51,9 +51,16 @@ namespace ScavengerHuntBackend.Controllers
                                     p.Title,
                                     p.Id as Id,
                                     COALESCE(SUM(pp.progress), 0) AS progress,
-                                    CASE 
-                                        WHEN COUNT(pp.puzzle_id) = 0 THEN 'not-started'
-                                        ELSE MAX(pp.status)
+                                    CASE MAX(
+                                         CASE 
+                                            WHEN pp.status = 'completed' THEN 2
+                                            WHEN pp.status = 'in-progress' THEN 1
+                                            ELSE 0
+                                         END
+                                    )
+                                        WHEN 2 THEN 'completed'
+                                        WHEN 1 THEN 'in-progress'
+                                        ELSE 'not-started'
                                     END AS status
                                 FROM scavengerhunt.puzzles AS p
                                 LEFT JOIN scavengerhunt.puzzleprogress AS pp 
@@ -65,18 +72,25 @@ namespace ScavengerHuntBackend.Controllers
                         {
                             // For user-based queries: join using user_id and aggregate progress.
                             cmd.CommandText = @"
-                                SELECT 
+                                  SELECT 
                                     p.Title,
                                     p.Id as Id,
                                     COALESCE(SUM(pp.progress), 0) AS progress,
-                                    CASE 
-                                        WHEN COUNT(pp.puzzle_id) = 0 THEN 'not-started'
-                                        ELSE MAX(pp.status)
+                                    CASE MAX(
+                                         CASE 
+                                            WHEN pp.status = 'completed' THEN 2
+                                            WHEN pp.status = 'in-progress' THEN 1
+                                            ELSE 0
+                                         END
+                                    )
+                                        WHEN 2 THEN 'completed'
+                                        WHEN 1 THEN 'in-progress'
+                                        ELSE 'not-started'
                                     END AS status
                                 FROM scavengerhunt.puzzles AS p
                                 LEFT JOIN scavengerhunt.puzzleprogress AS pp 
                                     ON p.id = pp.puzzle_id AND pp.user_id = @userId
-                                GROUP BY p.id, p.Title";
+                                GROUP BY p.id, p.Title;";
                             cmd.Parameters.AddWithValue("@userId", userId);
                         }
 
