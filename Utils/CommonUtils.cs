@@ -53,6 +53,35 @@ namespace ScavengerHuntBackend.Utils
             return userId.ToString();
         }
 
+        public static string IsTeamOwner(ClaimsPrincipal user, IConfiguration configuration)
+        {
+            var email = GetUserEmail(user);
+            if (string.IsNullOrEmpty(email))
+                throw new ArgumentNullException(nameof(email), "Email claim is missing.");
+
+            int userId;
+            var connString = configuration.GetConnectionString("DefaultConnection");
+            var IsTeamOwner = 0;
+            using (MySqlConnection conn = new MySqlConnection(connString))
+            {
+                conn.Open();
+                using (MySqlCommand cmd = conn.CreateCommand())
+                {
+                    cmd.CommandType = System.Data.CommandType.Text;
+                    cmd.CommandText = "SELECT teamowner FROM users WHERE email = @email";
+                    cmd.Parameters.AddWithValue("@email", email);
+
+                    object result = cmd.ExecuteScalar();
+                    if (result == null || result == DBNull.Value)
+                        throw new Exception("User not found.");
+
+                    IsTeamOwner = Convert.ToInt32(result);
+                }
+            }
+
+            return IsTeamOwner.ToString();
+        }
+
         public static string GetUserEmailByID(int userId, IConfiguration configuration)
         {
 
