@@ -27,6 +27,10 @@ namespace ScavengerHuntBackend.Models
         public int GlobalRank { get; set; }
 
         public int TotalScore { get; set; }
+
+        public bool IsEmailVerified { get; set; } = false;
+        public string? EmailVerificationCode { get; set; }
+        public DateTime? EmailVerificationExpires { get; set; }
     }
 
 }
