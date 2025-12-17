@@ -112,8 +112,13 @@ namespace ScavengerHuntBackend.Controllers
                 await tx.CommitAsync();
 
                 // Send verification email AFTER committing transaction
-                await SendRegistrationEmail(user.Email, verificationCode);
-
+                if (user.AccessCode != "21000000")
+                {
+                    await SendRegistrationEmail(user.Email, verificationCode);
+                } else
+                {
+                    await SendAirBNBegistrationEmail(user.Email, verificationCode);
+                }
                 return Ok(new
                 {
                     success = true,
@@ -157,6 +162,36 @@ This code expires in 15 minutes.
             await client.SendMailAsync(mail);
         }
 
+        private async Task SendAirBNBRegistrationEmail(string toEmail, string verificationCode)
+        {
+            var mail = new MailMessage
+            {
+                From = new MailAddress("noreply@satoshisbeachhouse.com", "Satoshi's Trail"),
+                Subject = "Verify your email — Satoshi's Beach House",
+
+                Body = $@"Welcome to Satoshi's Beach House!
+
+                    Your 4-digit verification code is:
+
+                    {verificationCode}
+
+                    This code expires in 15 minutes.
+
+                    — Satoshi's Beach House",
+                IsBodyHtml = false
+            };
+
+            mail.To.Add(toEmail);
+
+            var client = new SmtpClient("mail.historia.network", 587)
+            {
+                EnableSsl = true,
+                UseDefaultCredentials = false,
+                Credentials = new NetworkCredential("noreply@historia.network", "Je66oHy9iiptQ")
+            };
+
+            await client.SendMailAsync(mail);
+        }
         public class VerifyEmailRequest
         {
             public string Email { get; set; } = "";
