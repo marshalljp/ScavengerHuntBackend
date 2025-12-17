@@ -131,7 +131,8 @@ namespace ScavengerHuntBackend.Controllers
             var mail = new MailMessage
             {
                 From = new MailAddress("noreply@satoshisbeachhouse.com", "Satoshi's Trail"),
-                Subject = "Verify your email — Satoshi's Trail ???",
+                Subject = "Verify your email — Satoshi's Trail",
+
                 Body = $@"Welcome to Satoshi's Trail!
 
 Your 4-digit verification code is:
