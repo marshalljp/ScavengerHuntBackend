@@ -135,7 +135,7 @@ namespace ScavengerHuntBackend.Controllers
         {
             var mail = new MailMessage
             {
-                From = new MailAddress("noreply@satoshisbeachhouse.com", "Satoshi's Trail"),
+                From = new MailAddress("noreply@satoshisbeachhouse.com", "Satoshi's Beach House"),
                 Subject = "Verify your email — Satoshi's Trail",
 
                 Body = $@"Welcome to Satoshi's Trail!
@@ -166,7 +166,7 @@ This code expires in 15 minutes.
         {
             var mail = new MailMessage
             {
-                From = new MailAddress("noreply@satoshisbeachhouse.com", "Satoshi's Trail"),
+                From = new MailAddress("noreply@satoshisbeachhouse.com", "Satoshi's Beach House"),
                 Subject = "Verify your email — Satoshi's Beach House",
 
                 Body = $@"Welcome to Satoshi's Beach House!
@@ -368,8 +368,8 @@ This code expires in 15 minutes.
 
                         var mail = new MailMessage
                         {
-                            From = new MailAddress("noreply@satoshisbeachhouse.com", "Satoshi's Trail"),
-                            Subject = "Satoshi's Trail: Your Password Reset Code",
+                            From = new MailAddress("noreply@satoshisbeachhouse.com", "Satoshi's Beach House"),
+                            Subject = "Satoshi's Beach House: Your Password Reset Code",
                             Body = $"Your 4-digit reset code is: {code}\n\nThis code expires in 15 minutes.",
                             IsBodyHtml = false
                         };
