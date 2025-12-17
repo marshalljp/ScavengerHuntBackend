@@ -10,12 +10,9 @@ using System.Threading.Tasks;
 using ScavengerHuntBackend.Models;
 using MySqlConnector;
 using System.Net;
-using System.Xml;
 using System.Data;
 using ScavengerHuntBackend.Utils;
-using Microsoft.AspNetCore.Identity.Data;
 using System.Net.Mail;
-
 
 namespace ScavengerHuntBackend.Controllers
 {
@@ -36,99 +33,200 @@ namespace ScavengerHuntBackend.Controllers
         public async Task<IActionResult> Register([FromBody] User user)
         {
             if (user == null)
-                return BadRequest("User object is null.");
+                return BadRequest(new { success = false, message = "User object is null." });
 
-            // Validate email and password.
             if (string.IsNullOrEmpty(user.Email) || string.IsNullOrEmpty(user.PasswordHash))
-                return BadRequest("Email and password are required.");
+                return BadRequest(new { success = false, message = "Email and password are required." });
 
-            // Ensure the user does not already exist.
-            if (await _context.Users.AnyAsync(u => u.Email == user.Email))
-                return BadRequest("User already exists.");
+            if (await _context.Users.AnyAsync(u => u.Email.ToLower() == user.Email.ToLower()))
+                return BadRequest(new { success = false, message = "User already exists." });
 
-            // Hash the provided password.
             user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(user.PasswordHash);
+
+            var connString = _configuration.GetConnectionString("DefaultConnection");
+
+            try
+            {
+                await using var conn = new MySqlConnection(connString);
+                await conn.OpenAsync();
+
+                await using var tx = await conn.BeginTransactionAsync();
+                await using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+
+                // Validate access code
+                cmd.CommandText = "SELECT COUNT(*) FROM AccessCodes WHERE AccessCode = @AccessCode AND Used = 0";
+                cmd.Parameters.AddWithValue("@AccessCode", user.AccessCode);
+                int accessCodeCount = Convert.ToInt32(await cmd.ExecuteScalarAsync());
+
+                if (user.AccessCode == "21000000")
+                    accessCodeCount = 1;
+
+                if (accessCodeCount <= 0)
+                    return BadRequest(new { success = false, message = "Invalid access code." });
+
+                int teamId = 0;
+
+                // Generate email verification code
+                Random rnd = new Random();
+                string verificationCode = rnd.Next(1000, 9999).ToString();
+                DateTime expiresAt = DateTime.UtcNow.AddMinutes(15);
+
+                // Insert user
+                cmd.Parameters.Clear();
+                cmd.CommandText = @"
+            INSERT INTO users 
+            (Email, PasswordHash, TeamID, Role, IsEmailVerified, EmailVerificationCode, EmailVerificationExpires)
+            VALUES
+            (@Email, @PasswordHash, @TeamID, @Role, 0, @Code, @Expires);
+            SELECT LAST_INSERT_ID();";
+
+                cmd.Parameters.AddWithValue("@Email", user.Email);
+                cmd.Parameters.AddWithValue("@PasswordHash", user.PasswordHash);
+                cmd.Parameters.AddWithValue("@TeamID", teamId);
+                cmd.Parameters.AddWithValue("@Role", user.AccessCode == "21000000" ? 1 : 2);
+                cmd.Parameters.AddWithValue("@Code", verificationCode);
+                cmd.Parameters.AddWithValue("@Expires", expiresAt);
+
+                int newUserId = Convert.ToInt32(await cmd.ExecuteScalarAsync());
+
+                // Copy puzzle progress
+                cmd.Parameters.Clear();
+                cmd.CommandText = @"
+            INSERT INTO puzzleprogress (user_id, puzzle_id, team_id, puzzleidorder)
+            SELECT @UserId, puzzleid, @TeamId, puzzleidorder
+            FROM puzzlesdetails;";
+                cmd.Parameters.AddWithValue("@UserId", newUserId);
+                cmd.Parameters.AddWithValue("@TeamId", teamId);
+                await cmd.ExecuteNonQueryAsync();
+
+                // Mark access code as used (non-trail)
+                if (user.AccessCode != "21000000")
+                {
+                    cmd.Parameters.Clear();
+                    cmd.CommandText = "UPDATE AccessCodes SET Used = 1 WHERE AccessCode = @AccessCode";
+                    cmd.Parameters.AddWithValue("@AccessCode", user.AccessCode);
+                    await cmd.ExecuteNonQueryAsync();
+                }
+
+                await tx.CommitAsync();
+
+                // Send verification email AFTER committing transaction
+                await SendRegistrationEmail(user.Email, verificationCode);
+
+                return Ok(new
+                {
+                    success = true,
+                    message = "Registration successful. Please check your email for the verification code."
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { success = false, message = $"Internal server error: {ex.Message}" });
+            }
+        }
+
+        private async Task SendRegistrationEmail(string toEmail, string verificationCode)
+        {
+            var mail = new MailMessage
+            {
+                From = new MailAddress("noreply@satoshisbeachhouse.com", "Satoshi's Trail"),
+                Subject = "Verify your email — Satoshi's Trail ???",
+                Body = $@"Welcome to Satoshi's Trail!
+
+Your 4-digit verification code is:
+
+{verificationCode}
+
+This code expires in 15 minutes.
+
+— Satoshi's Trail",
+                IsBodyHtml = false
+            };
+
+            mail.To.Add(toEmail);
+
+            var client = new SmtpClient("mail.historia.network", 587)
+            {
+                EnableSsl = true,
+                UseDefaultCredentials = false,
+                Credentials = new NetworkCredential("noreply@historia.network", "Je66oHy9iiptQ")
+            };
+
+            await client.SendMailAsync(mail);
+        }
+
+        public class VerifyEmailRequest
+        {
+            public string Email { get; set; } = "";
+            public string Code { get; set; } = "";
+        }
+
+        [HttpPost("verify-email")]
+        public async Task<IActionResult> VerifyEmail([FromBody] VerifyEmailRequest request)
+        {
+            if (request == null || string.IsNullOrEmpty(request.Email) || string.IsNullOrEmpty(request.Code))
+                return BadRequest(new { success = false, message = "Email and verification code are required." });
 
             try
             {
                 var connString = _configuration.GetConnectionString("DefaultConnection");
-                using (MySqlConnection conn = new MySqlConnection(connString))
+
+                using (var conn = new MySqlConnection(connString))
                 {
-                    using (MySqlCommand cmd = conn.CreateCommand())
+                    await conn.OpenAsync();
+
+                    using (var cmd = conn.CreateCommand())
                     {
-                        conn.Open();
+                        cmd.CommandText = @"
+                            SELECT Id, EmailVerificationCode, EmailVerificationExpires, IsEmailVerified
+                            FROM users
+                            WHERE Email = @Email
+                            LIMIT 1;";
+                        cmd.Parameters.AddWithValue("@Email", request.Email);
 
-                        // Check if the access code exists and is not used.
-                        cmd.CommandType = System.Data.CommandType.Text;
-                        cmd.CommandText = "SELECT COUNT(*) FROM AccessCodes WHERE AccessCode = @AccessCode AND Used = 0";
-                        cmd.Parameters.AddWithValue("@AccessCode", user.AccessCode);
-                        int accessCodeCount = Convert.ToInt32(cmd.ExecuteScalar());
-                        if(user.AccessCode == "21000000")
-                        {
-                            accessCodeCount = 1;
-                        }
-                        if (accessCodeCount > 0)
-                        {
-                            int teamId = 0;
+                        using var reader = await cmd.ExecuteReaderAsync();
 
+                        if (!reader.Read())
+                            return BadRequest(new { success = false, message = "Invalid verification attempt." });
 
-                            // Insert the new user and capture the generated user ID.
-                            cmd.CommandText = "INSERT INTO users (Email, PasswordHash, TeamID, Role) VALUES (@Email, @PasswordHash, @TeamID, @Role); SELECT LAST_INSERT_ID();";
-                            cmd.Parameters.Clear();
-                            cmd.Parameters.AddWithValue("@Email", user.Email);
-                            cmd.Parameters.AddWithValue("@PasswordHash", user.PasswordHash);
-                            cmd.Parameters.AddWithValue("@TeamID", teamId);
-                            if (user.AccessCode == "21000000")
-                            {
-                                //Trail Role
-                                cmd.Parameters.AddWithValue("@Role", 1);
-                            }
-                            else
-                            {
-                                //Guest Role
-                                cmd.Parameters.AddWithValue("@Role", 2);
-                            }
-                            int newUserId = Convert.ToInt32(cmd.ExecuteScalar());
+                        int userId = reader.GetInt32("Id");
+                        string? dbCode = reader["EmailVerificationCode"] as string;
+                        DateTime? expiresAt = reader["EmailVerificationExpires"] as DateTime?;
+                        bool isVerified = reader.GetBoolean("IsEmailVerified");
 
-                            // ---
-                            // Copy puzzle progress rows from the old table to the new table,
-                            // replacing the user_id with the new user's id.
-                            // NOTE: Adjust the source and destination table names as needed.
-                            // Here we assume the old table is named "old_puzzleprogress" and the new table is "puzzleprogress".
-                            // ---
-                            cmd.CommandType = CommandType.Text;
-                            cmd.CommandText =
-                                "INSERT INTO puzzleprogress (user_id, puzzle_id, team_id, puzzleidorder) " +
-                                "SELECT @NewUserId, puzzleid, @teamId, puzzleidorder " +
-                                "FROM puzzlesdetails;";
-                            cmd.Parameters.Clear();
-                            cmd.Parameters.AddWithValue("@NewUserId", newUserId);
-                            cmd.Parameters.AddWithValue("@teamId", teamId);
-                            await cmd.ExecuteNonQueryAsync();
-                            
-                            if (user.AccessCode != "21000000")
-                            {
-                                // Mark the access code as used.
-                                cmd.CommandText = "UPDATE AccessCodes SET Used = 1 WHERE AccessCode = @AccessCode";
-                                cmd.Parameters.Clear();
-                                cmd.Parameters.AddWithValue("@AccessCode", user.AccessCode);
-                                cmd.ExecuteNonQuery(); ;
-                            }
+                        if (isVerified)
+                            return Ok(new { success = true, message = "Email already verified." });
 
+                        if (dbCode == null || expiresAt == null)
+                            return BadRequest(new { success = false, message = "No active verification code found." });
 
+                        if (DateTime.UtcNow > expiresAt.Value)
+                            return BadRequest(new { success = false, message = "Verification code has expired." });
 
-                            return Ok(new { success = true, message = "User registered successfully. Please login now!" });
-                        }
-                        else
-                        {
-                            return BadRequest("Invalid access code.");
-                        }
+                        if (dbCode != request.Code)
+                            return BadRequest(new { success = false, message = "Invalid verification code." });
+
+                        reader.Close();
+
+                        cmd.Parameters.Clear();
+                        cmd.CommandText = @"
+                            UPDATE users
+                            SET IsEmailVerified = 1,
+                                EmailVerificationCode = NULL,
+                                EmailVerificationExpires = NULL
+                            WHERE Id = @UserId;";
+                        cmd.Parameters.AddWithValue("@UserId", userId);
+
+                        await cmd.ExecuteNonQueryAsync();
+
+                        return Ok(new { success = true, message = "Email successfully verified!" });
                     }
                 }
             }
             catch (Exception ex)
             {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                return StatusCode(500, new { success = false, message = $"Internal server error: {ex.Message}" });
             }
         }
 
@@ -142,39 +240,33 @@ namespace ScavengerHuntBackend.Controllers
         public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest request)
         {
             if (request == null || string.IsNullOrEmpty(request.CurrentPassword) || string.IsNullOrEmpty(request.NewPassword))
-                return BadRequest("Current and new password are required.");
+                return BadRequest(new { success = false, message = "Current and new password are required." });
 
             try
             {
-                // Get user ID from JWT token
                 int userId = Convert.ToInt32(CommonUtils.GetUserID(User, _configuration));
-
                 var connString = _configuration.GetConnectionString("DefaultConnection");
+
                 using (var conn = new MySqlConnection(connString))
                 {
                     await conn.OpenAsync();
 
                     using (var cmd = conn.CreateCommand())
                     {
-                        // STEP 1 — Get current stored password hash
                         cmd.CommandText = "SELECT PasswordHash FROM users WHERE Id = @Id";
                         cmd.Parameters.AddWithValue("@Id", userId);
 
                         var existingHashObj = await cmd.ExecuteScalarAsync();
                         if (existingHashObj == null)
-                            return Unauthorized("User not found.");
+                            return Unauthorized(new { success = false, message = "User not found." });
 
                         string existingHash = existingHashObj.ToString();
 
-                        // STEP 2 — Verify the current password
-                        bool validPassword = BCrypt.Net.BCrypt.Verify(request.CurrentPassword, existingHash);
-                        if (!validPassword)
-                            return Unauthorized("Current password is incorrect.");
+                        if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, existingHash))
+                            return Unauthorized(new { success = false, message = "Current password is incorrect." });
 
-                        // STEP 3 — Hash new password
                         string newHashedPassword = BCrypt.Net.BCrypt.HashPassword(request.NewPassword);
 
-                        // STEP 4 — Update database
                         cmd.Parameters.Clear();
                         cmd.CommandText = "UPDATE users SET PasswordHash = @NewHash WHERE Id = @Id";
                         cmd.Parameters.AddWithValue("@NewHash", newHashedPassword);
@@ -188,7 +280,7 @@ namespace ScavengerHuntBackend.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                return StatusCode(500, new { success = false, message = $"Internal server error: {ex.Message}" });
             }
         }
 
@@ -197,12 +289,11 @@ namespace ScavengerHuntBackend.Controllers
             public string Email { get; set; }
         }
 
-
-        [HttpPost("forgotpassword")] 
+        [HttpPost("forgotpassword")]
         public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest request)
         {
             if (request == null || string.IsNullOrEmpty(request.Email))
-                return BadRequest("Email is required.");
+                return BadRequest(new { success = false, message = "Email is required." });
 
             try
             {
@@ -214,11 +305,10 @@ namespace ScavengerHuntBackend.Controllers
 
                     using (var cmd = conn.CreateCommand())
                     {
-                        // STEP 1 — Check if user exists
                         cmd.CommandText = "SELECT Id FROM users WHERE Email = @Email";
                         cmd.Parameters.AddWithValue("@Email", request.Email);
 
-                        object userIdObj = await cmd.ExecuteScalarAsync();
+                        var userIdObj = await cmd.ExecuteScalarAsync();
                         if (userIdObj == null)
                         {
                             // Always return success to prevent email enumeration
@@ -226,27 +316,19 @@ namespace ScavengerHuntBackend.Controllers
                         }
 
                         int userId = Convert.ToInt32(userIdObj);
-
-                        // STEP 2 — Generate 4-digit code
                         Random rnd = new Random();
-                        string code = rnd.Next(1000, 9999).ToString(); // 4-digit code
-                        DateTime expiresAt = DateTime.UtcNow.AddMinutes(15); // code valid for 15 mins
+                        string code = rnd.Next(1000, 9999).ToString();
+                        DateTime expiresAt = DateTime.UtcNow.AddMinutes(15);
 
-                        // STEP 3 — Insert the code into the database
                         cmd.Parameters.Clear();
                         cmd.CommandText = @"
-                    INSERT INTO PasswordResetTokens (UserId, Token, ExpiresAt)
-                    VALUES (@UserId, @Token, @ExpiresAt);";
-
+                            INSERT INTO PasswordResetTokens (UserId, Token, ExpiresAt)
+                            VALUES (@UserId, @Token, @ExpiresAt);";
                         cmd.Parameters.AddWithValue("@UserId", userId);
-                        cmd.Parameters.AddWithValue("@Token", code); // store 4-digit code in Token field
+                        cmd.Parameters.AddWithValue("@Token", code);
                         cmd.Parameters.AddWithValue("@ExpiresAt", expiresAt);
 
                         await cmd.ExecuteNonQueryAsync();
-
-                        // STEP 4 — Send email with code
-                        // TODO: Integrate your email service here
-                        // Example: EmailService.SendEmail(request.Email, "Your reset code", $"Your 4-digit code is: {code}");
 
                         var mail = new MailMessage
                         {
@@ -262,34 +344,23 @@ namespace ScavengerHuntBackend.Controllers
                         {
                             EnableSsl = true,
                             UseDefaultCredentials = false,
-                            Credentials = new NetworkCredential(
-                                "noreply@historia.network",
-                                "Je66oHy9iiptQ"
-                            )
+                            Credentials = new NetworkCredential("noreply@historia.network", "Je66oHy9iiptQ")
                         };
 
-                        try
-                        {
-                            client.Send(mail);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine("Exception caught in CreateTestMessage4(): {0}", ex.ToString());
-                        }
-
+                        try { client.Send(mail); }
+                        catch { }
 
                         return Ok(new
                         {
                             success = true,
-                            message = "If that email exists, a reset code has been sent.",
-                            //testCode = code // REMOVE in production
+                            message = "If that email exists, a reset code has been sent."
                         });
                     }
                 }
             }
             catch (Exception ex)
             {
-                return StatusCode(500, $"Internal server error: {ex.Message}");
+                return StatusCode(500, new { success = false, message = $"Internal server error: {ex.Message}" });
             }
         }
 
@@ -308,7 +379,7 @@ namespace ScavengerHuntBackend.Controllers
                 string.IsNullOrWhiteSpace(request.Code) ||
                 string.IsNullOrWhiteSpace(request.NewPassword))
             {
-                return BadRequest(new { message = "Invalid request." });
+                return BadRequest(new { success = false, message = "Invalid request." });
             }
 
             try
@@ -324,58 +395,40 @@ namespace ScavengerHuntBackend.Controllers
                     {
                         cmd.Transaction = tx;
 
-                        // STEP 1 — Get user
                         cmd.CommandText = "SELECT Id FROM users WHERE Email = @Email";
                         cmd.Parameters.AddWithValue("@Email", request.Email);
 
                         var userIdObj = await cmd.ExecuteScalarAsync();
                         if (userIdObj == null)
-                        {
-                            return BadRequest(new { message = "Invalid reset code or expired." });
-                        }
+                            return BadRequest(new { success = false, message = "Invalid reset code or expired." });
 
                         int userId = Convert.ToInt32(userIdObj);
 
-                        // STEP 2 — Validate reset token
                         cmd.Parameters.Clear();
                         cmd.CommandText = @"
-                    SELECT Id
-                    FROM PasswordResetTokens
-                    WHERE UserId = @UserId
-                      AND Token = @Token
-                      AND Used = 0
-                      AND ExpiresAt >= UTC_TIMESTAMP()
-                    ORDER BY Id DESC
-                    LIMIT 1;
-                ";
-
+                            SELECT Id FROM PasswordResetTokens
+                            WHERE UserId = @UserId AND Token = @Token AND Used = 0 AND ExpiresAt >= UTC_TIMESTAMP()
+                            ORDER BY Id DESC LIMIT 1;";
                         cmd.Parameters.AddWithValue("@UserId", userId);
                         cmd.Parameters.AddWithValue("@Token", request.Code);
 
                         var tokenIdObj = await cmd.ExecuteScalarAsync();
                         if (tokenIdObj == null)
-                        {
-                            return BadRequest(new { message = "Invalid reset code or expired." });
-                        }
+                            return BadRequest(new { success = false, message = "Invalid reset code or expired." });
 
                         int tokenId = Convert.ToInt32(tokenIdObj);
 
-                        // STEP 3 — Hash new password
                         string hashedPassword = BCrypt.Net.BCrypt.HashPassword(request.NewPassword);
 
-                        // STEP 4 — Update user password
                         cmd.Parameters.Clear();
                         cmd.CommandText = "UPDATE users SET PasswordHash = @Password WHERE Id = @UserId";
                         cmd.Parameters.AddWithValue("@Password", hashedPassword);
                         cmd.Parameters.AddWithValue("@UserId", userId);
-
                         await cmd.ExecuteNonQueryAsync();
 
-                        // STEP 5 — Mark token as used
                         cmd.Parameters.Clear();
                         cmd.CommandText = "UPDATE PasswordResetTokens SET Used = 1 WHERE Id = @TokenId";
                         cmd.Parameters.AddWithValue("@TokenId", tokenId);
-
                         await cmd.ExecuteNonQueryAsync();
 
                         await tx.CommitAsync();
@@ -384,23 +437,99 @@ namespace ScavengerHuntBackend.Controllers
                     }
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                return StatusCode(500, new { message = "Internal server error." });
+                return StatusCode(500, new { success = false, message = "Internal server error." });
             }
         }
-
 
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromBody] User loginRequest)
         {
-            var user = await _context.Users
-            .FirstOrDefaultAsync(u => u.Email.ToLower() == loginRequest.Email.ToLower());
+            if (string.IsNullOrEmpty(loginRequest.Email) || string.IsNullOrEmpty(loginRequest.PasswordHash))
+            {
+                return BadRequest(new { success = false, message = "Email and password are required." });
+            }
+
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Email.ToLower() == loginRequest.Email.ToLower());
+
             if (user == null || !BCrypt.Net.BCrypt.Verify(loginRequest.PasswordHash, user.PasswordHash))
-                return Unauthorized("Invalid credentials.");
+            {
+                return Ok(new { success = false, message = "Invalid email or password" });
+            }
+
+            if (!user.IsEmailVerified)
+            {
+                return Ok(new
+                {
+                    success = false,
+                    requiresEmailVerification = true,
+                    message = "Your email is not verified. Please check your inbox for the verification code."
+                });
+            }
 
             var token = GenerateJwtToken(user);
-            return Ok(new { Token = token });
+
+            return Ok(new { success = true, token = token, emailVerified = true, message = "Login successful." });
+        }
+
+        [HttpPost("resend-verification")]
+        public async Task<IActionResult> ResendVerificationEmail([FromBody] ResendEmailRequest request)
+        {
+            if (request == null || string.IsNullOrEmpty(request.Email))
+                return BadRequest(new { success = false, message = "Email is required." });
+
+            try
+            {
+                var connString = _configuration.GetConnectionString("DefaultConnection");
+
+                using var conn = new MySqlConnection(connString);
+                await conn.OpenAsync();
+
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT Id FROM Users WHERE Email = @Email";
+                cmd.Parameters.AddWithValue("@Email", request.Email);
+
+                var userIdObj = await cmd.ExecuteScalarAsync();
+                if (userIdObj == null)
+                    return BadRequest(new { success = false, message = "No user found with this email." });
+
+                int userId = Convert.ToInt32(userIdObj);
+
+                // Generate new 4-digit code
+                var rnd = new Random();
+                string newCode = rnd.Next(1000, 9999).ToString();
+                DateTime expiresAt = DateTime.UtcNow.AddMinutes(15);
+
+                // Update user record
+                cmd.Parameters.Clear();
+                cmd.CommandText = @"
+            UPDATE Users
+            SET EmailVerificationCode = @Code,
+                EmailVerificationExpires = @Expires,
+                IsEmailVerified = 0
+            WHERE Id = @UserId";
+                cmd.Parameters.AddWithValue("@Code", newCode);
+                cmd.Parameters.AddWithValue("@Expires", expiresAt);
+                cmd.Parameters.AddWithValue("@UserId", userId);
+
+                await cmd.ExecuteNonQueryAsync();
+
+                // Send the email asynchronously
+                await SendRegistrationEmail(request.Email, newCode);
+
+                return Ok(new { success = true, message = "Verification code resent. Please check your email." });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { success = false, message = $"Internal server error: {ex.Message}" });
+            }
+        }
+
+        // DTO for request
+        public class ResendEmailRequest
+        {
+            public string Email { get; set; } = "";
         }
 
         private string GenerateJwtToken(User user)
