@@ -44,54 +44,71 @@ namespace ScavengerHuntBackend.Controllers
                     using (MySqlCommand cmd = conn.CreateCommand())
                     {
                         cmd.CommandType = CommandType.Text;
+
                         if (teamId != 9999)
                         {
-                            // For team-based queries: join using team_id and aggregate progress.
+                            // Team-based query with completed-percentage progress
                             cmd.CommandText = @"
-                                SELECT 
-                                    p.Title,
-                                    p.Id as Id,
-                                    COALESCE(SUM(pp.progress), 0) AS progress,
-                                    CASE MAX(
-                                         CASE 
-                                            WHEN pp.status = 'completed' THEN 2
-                                            WHEN pp.status = 'in-progress' THEN 1
-                                            ELSE 0
-                                         END
-                                    )
-                                        WHEN 2 THEN 'completed'
-                                        WHEN 1 THEN 'in-progress'
-                                        ELSE 'not-started'
-                                    END AS status
-                                FROM scavengerhunt.puzzles AS p
-                                LEFT JOIN scavengerhunt.puzzleprogress AS pp 
-                                    ON p.id = pp.puzzle_id AND pp.team_id = @teamId
-                                GROUP BY p.id, p.Title";
+                           SELECT 
+                                p.Title,
+                                p.Id AS Id,
+
+                                -- Progress = percentage of rows completed
+                                CASE 
+                                    WHEN COUNT(pp.id) = 0 THEN 0
+                                    ELSE ROUND(SUM(pp.is_completed = 1) / COUNT(pp.id) * 100)
+                                END AS progress,
+
+                                -- Status based on is_completed
+                                CASE
+                                    WHEN COUNT(pp.id) = 0 THEN 'not-started'
+                                    WHEN SUM(pp.is_completed = 1) = 0 THEN 'not-started'
+                                    WHEN SUM(pp.is_completed = 1) > 0 AND SUM(pp.is_completed = 0) > 0 THEN 'in-progress'
+                                    WHEN SUM(pp.is_completed = 1) = COUNT(pp.id) THEN 'completed'
+                                    ELSE 'not-started'
+                                END AS status,
+
+                                -- Total score
+                                COALESCE(SUM(pp.progress), 0) AS score
+
+                            FROM scavengerhunt.puzzles AS p
+                            LEFT JOIN scavengerhunt.puzzleprogress AS pp 
+                                ON p.id = pp.puzzle_id
+                                AND pp.user_id IN (SELECT id FROM users WHERE teamid = @teamId)
+                            GROUP BY p.id, p.Title;";
                             cmd.Parameters.AddWithValue("@teamId", teamId);
                         }
                         else
                         {
-                            // For user-based queries: join using user_id and aggregate progress.
+                            // User-based query with completed-percentage progress
                             cmd.CommandText = @"
-                                  SELECT 
-                                    p.Title,
-                                    p.Id as Id,
-                                    COALESCE(SUM(pp.progress), 0) AS progress,
-                                    CASE MAX(
-                                         CASE 
-                                            WHEN pp.status = 'completed' THEN 2
-                                            WHEN pp.status = 'in-progress' THEN 1
-                                            ELSE 0
-                                         END
-                                    )
-                                        WHEN 2 THEN 'completed'
-                                        WHEN 1 THEN 'in-progress'
-                                        ELSE 'not-started'
-                                    END AS status
-                                FROM scavengerhunt.puzzles AS p
-                                LEFT JOIN scavengerhunt.puzzleprogress AS pp 
-                                    ON p.id = pp.puzzle_id AND pp.user_id = @userId
-                                GROUP BY p.id, p.Title;";
+                            SELECT 
+                                p.Title,
+                                p.Id AS Id,
+
+                                -- Progress = percentage of rows completed
+                                CASE 
+                                    WHEN COUNT(pp.id) = 0 THEN 0
+                                    ELSE ROUND(SUM(pp.is_completed = 1) / COUNT(pp.id) * 100)
+                                END AS progress,
+
+                                -- Status based on is_completed
+                                CASE
+                                    WHEN COUNT(pp.id) = 0 THEN 'not-started'
+                                    WHEN SUM(pp.is_completed = 1) = 0 THEN 'not-started'
+                                    WHEN SUM(pp.is_completed = 1) > 0 AND SUM(pp.is_completed = 0) > 0 THEN 'in-progress'
+                                    WHEN SUM(pp.is_completed = 1) = COUNT(pp.id) THEN 'completed'
+                                    ELSE 'not-started'
+                                END AS status,
+
+                                -- Total score
+                                COALESCE(SUM(pp.progress), 0) AS score
+
+                            FROM scavengerhunt.puzzles AS p
+                            LEFT JOIN scavengerhunt.puzzleprogress AS pp 
+                                ON p.id = pp.puzzle_id AND pp.user_id = @userId
+                            GROUP BY p.id, p.Title;
+";
                             cmd.Parameters.AddWithValue("@userId", userId);
                         }
 
@@ -110,8 +127,10 @@ namespace ScavengerHuntBackend.Controllers
                             }
                         }
                     }
+
                     await conn.CloseAsync();
                 }
+
                 return Ok(new { success = true, puzzles = puzzles });
             }
             catch (Exception ex)
@@ -332,8 +351,8 @@ namespace ScavengerHuntBackend.Controllers
                         cmd.Parameters.AddWithValue("@puzzleId", submission.puzzleId);
                         cmd.Parameters.AddWithValue("@puzzleidorder", submission.subpuzzleId);
                         cmd.Parameters.AddWithValue("@progress", 10);
-                        cmd.Parameters.AddWithValue("@is_completed", 0);
-                        cmd.Parameters.AddWithValue("@status", "in-progress");
+                        cmd.Parameters.AddWithValue("@is_completed", 1);
+                        cmd.Parameters.AddWithValue("@status", "completed");
                         cmd.Parameters.AddWithValue("@team_id", teamId);
                         await cmd.ExecuteNonQueryAsync();
                         if(CommonUtils.GS_internal(User, _configuration, submission.puzzleId))
