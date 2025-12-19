@@ -76,11 +76,12 @@ namespace ScavengerHuntBackend.Controllers
                 cmd.Parameters.Clear();
                 cmd.CommandText = @"
             INSERT INTO users 
-            (Email, PasswordHash, TeamID, Role, IsEmailVerified, EmailVerificationCode, EmailVerificationExpires)
+            (Name, Email, PasswordHash, TeamID, Role, IsEmailVerified, EmailVerificationCode, EmailVerificationExpires)
             VALUES
-            (@Email, @PasswordHash, @TeamID, @Role, 0, @Code, @Expires);
+            (@Name, @Email, @PasswordHash, @TeamID, @Role, 0, @Code, @Expires);
             SELECT LAST_INSERT_ID();";
 
+                cmd.Parameters.AddWithValue("@Name", user.Name);
                 cmd.Parameters.AddWithValue("@Email", user.Email);
                 cmd.Parameters.AddWithValue("@PasswordHash", user.PasswordHash);
                 cmd.Parameters.AddWithValue("@TeamID", teamId);
@@ -117,7 +118,7 @@ namespace ScavengerHuntBackend.Controllers
                     await SendRegistrationEmail(user.Email, verificationCode);
                 } else
                 {
-                    await SendAirBNBegistrationEmail(user.Email, verificationCode);
+                    await SendAirBNBRegistrationEmail(user.Email, verificationCode);
                 }
                 return Ok(new
                 {
