@@ -384,90 +384,101 @@ namespace ScavengerHuntBackend.Controllers
 
             return Ok(new { correct = submission.IsCorrect });
         }
+
         [HttpGet("gs/{id}")]
         public async Task<IActionResult> GS(int id)
         {
             try
             {
-                var email = CommonUtils.GetUserEmail(User);
                 var userId = CommonUtils.GetUserID(User, _configuration);
-                int teamId = Int32.Parse(CommonUtils.GetTeamUserID(User, _configuration));
                 var connString = _configuration.GetConnectionString("DefaultConnection");
 
-                // Flag to determine if any progress rows were returned.
-                bool foundProgressRow = false;
+                bool hasRequiredRows = false;
 
-                using (MySqlConnection conn = new MySqlConnection(connString))
+                using (var conn = new MySqlConnection(connString))
                 {
                     await conn.OpenAsync();
 
-                    // Query the progress values.
-                    using (MySqlCommand cmd = conn.CreateCommand())
+                    // --------------------------------------------------
+                    // 1. Check required-for-seed completion for THIS puzzle
+                    // --------------------------------------------------
+                    using (var cmd = conn.CreateCommand())
                     {
                         cmd.CommandType = CommandType.Text;
                         cmd.CommandText = @"
-                    SELECT progress 
-                    FROM scavengerhunt.puzzleprogress 
-                    JOIN puzzlesdetails 
-                      ON puzzlesdetails.puzzleidorder = puzzleprogress.puzzleidorder 
-                    WHERE user_id = @userId 
-                      AND requiredForSeed = 1";
+                    SELECT pp.is_completed
+                    FROM scavengerhunt.puzzleprogress pp
+                    JOIN scavengerhunt.puzzlesdetails pd
+                        ON pd.puzzleidorder = pp.puzzleidorder
+                    WHERE pp.user_id = @userId
+                      AND pp.puzzle_id = @puzzleid
+                      AND pd.requiredForSeed = 1;
+                ";
+
                         cmd.Parameters.AddWithValue("@userId", userId);
+                        cmd.Parameters.AddWithValue("@puzzleid", id);
 
                         using (var rdr = await cmd.ExecuteReaderAsync())
                         {
                             while (await rdr.ReadAsync())
                             {
-                                foundProgressRow = true;
-                                int progressIndex = rdr.GetOrdinal("progress");
-                                // Check if the progress field is null.
-                                if (rdr.IsDBNull(progressIndex))
-                                {
-                                    return Ok(new { success = false, message = "Progress value missing" });
-                                }
+                                hasRequiredRows = true;
 
-                                int progressValue = rdr.GetInt32(progressIndex);
-                                // If any progress value is 0, progress is incomplete.
-                                if (progressValue == 0)
+                                int isCompleted = rdr.GetInt32(0);
+
+                                // ? Any incomplete required step blocks the seed
+                                if (isCompleted == 0)
                                 {
-                                    return Ok(new { success = false, message = "Progress incomplete" });
+                                    return Ok(new
+                                    {
+                                        success = false,
+                                        message = "Required steps not completed"
+                                    });
                                 }
                             }
                         }
                     }
 
-                    // If no rows were returned, then there are no progress records—so progress is incomplete.
-                    if (!foundProgressRow)
+                    // ? No required-for-seed rows exist for this puzzle
+                    if (!hasRequiredRows)
                     {
-                        return Ok(new { success = false, message = "Progress incomplete: no progress records found" });
+                        return Ok(new
+                        {
+                            success = false,
+                            message = "No required steps found"
+                        });
                     }
 
-                    // If progress exists and is complete (nonzero), retrieve the seed word.
-                    string seed = null;
-                    using (MySqlCommand cmd = conn.CreateCommand())
+                    // --------------------------------------------------
+                    // 2. All required steps complete ? fetch seed
+                    // --------------------------------------------------
+                    using (var cmd = conn.CreateCommand())
                     {
                         cmd.CommandType = CommandType.Text;
-                        cmd.CommandText = "SELECT seed FROM scavengerhunt.seeds WHERE puzzle_id = @id";
-                        cmd.Parameters.AddWithValue("@id", id);
+                        cmd.CommandText = @"
+                    SELECT seed
+                    FROM scavengerhunt.seeds
+                    WHERE puzzle_id = @puzzleid;
+                ";
 
-                        using (var rdr = await cmd.ExecuteReaderAsync())
+                        cmd.Parameters.AddWithValue("@puzzleid", id);
+
+                        var seed = (await cmd.ExecuteScalarAsync())?.ToString();
+
+                        if (!string.IsNullOrEmpty(seed))
                         {
-                            if (await rdr.ReadAsync())
+                            return Ok(new
                             {
-                                seed = rdr["seed"]?.ToString();
-                            }
+                                success = true,
+                                seed = seed
+                            });
                         }
-                    }
 
-                    await conn.CloseAsync();
-
-                    if (!string.IsNullOrEmpty(seed))
-                    {
-                        return Ok(new { success = true, seed = seed });
-                    }
-                    else
-                    {
-                        return Ok(new { success = false, message = "Seed not found." });
+                        return Ok(new
+                        {
+                            success = false,
+                            message = "Seed not found"
+                        });
                     }
                 }
             }
