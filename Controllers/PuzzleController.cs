@@ -49,33 +49,39 @@ namespace ScavengerHuntBackend.Controllers
                         {
                             // Team-based query with completed-percentage progress
                             cmd.CommandText = @"
-                           SELECT 
-                                p.Title,
-                                p.Id AS Id,
+                                SELECT 
+                                    p.Title,
+                                    p.Id AS Id,
 
-                                -- Progress = percentage of rows completed
-                                CASE 
-                                    WHEN COUNT(pp.id) = 0 THEN 0
-                                    ELSE ROUND(SUM(pp.is_completed = 1) / COUNT(pp.id) * 100)
-                                END AS progress,
+                                    -- Progress = percentage of REAL subpuzzles completed (exclude puzzleidorder = 0)
+                                    CASE 
+                                        WHEN COUNT(CASE WHEN pp.puzzleidorder != 0 THEN pp.id END) = 0 THEN 0
+                                        ELSE ROUND(
+                                            SUM(CASE WHEN pp.puzzleidorder != 0 AND pp.is_completed = 1 THEN 1 ELSE 0 END) 
+                                            / COUNT(CASE WHEN pp.puzzleidorder != 0 THEN pp.id END) * 100
+                                        )
+                                    END AS progress,
 
-                                -- Status based on is_completed
-                                CASE
-                                    WHEN COUNT(pp.id) = 0 THEN 'not-started'
-                                    WHEN SUM(pp.is_completed = 1) = 0 THEN 'not-started'
-                                    WHEN SUM(pp.is_completed = 1) > 0 AND SUM(pp.is_completed = 0) > 0 THEN 'in-progress'
-                                    WHEN SUM(pp.is_completed = 1) = COUNT(pp.id) THEN 'completed'
-                                    ELSE 'not-started'
-                                END AS status,
+                                    -- Status based only on real subpuzzles
+                                    CASE
+                                        WHEN COUNT(CASE WHEN pp.puzzleidorder != 0 THEN pp.id END) = 0 THEN 'not-started'
+                                        WHEN SUM(CASE WHEN pp.puzzleidorder != 0 AND pp.is_completed = 1 THEN 1 ELSE 0 END) = 0 THEN 'not-started'
+                                        WHEN SUM(CASE WHEN pp.puzzleidorder != 0 AND pp.is_completed = 1 THEN 1 ELSE 0 END) > 0 
+                                          AND SUM(CASE WHEN pp.puzzleidorder != 0 AND pp.is_completed = 0 THEN 1 ELSE 0 END) > 0 THEN 'in-progress'
+                                        WHEN SUM(CASE WHEN pp.puzzleidorder != 0 AND pp.is_completed = 1 THEN 1 ELSE 0 END) = 
+                                             COUNT(CASE WHEN pp.puzzleidorder != 0 THEN pp.id END) THEN 'completed'
+                                        ELSE 'not-started'
+                                    END AS status,
 
-                                -- Total score
-                                COALESCE(SUM(pp.progress), 0) AS score
+                                    -- Total score: only sum progress from real subpuzzles (exclude puzzleidorder = 0)
+                                    COALESCE(SUM(CASE WHEN pp.puzzleidorder != 0 THEN pp.progress ELSE 0 END), 0) AS score
 
-                            FROM scavengerhunt.puzzles AS p
-                            LEFT JOIN scavengerhunt.puzzleprogress AS pp 
-                                ON p.id = pp.puzzle_id
-                                AND pp.user_id IN (SELECT id FROM users WHERE teamid = @teamId)
-                            GROUP BY p.id, p.Title;";
+                                FROM scavengerhunt.puzzles AS p
+                                LEFT JOIN scavengerhunt.puzzleprogress AS pp 
+                                    ON p.id = pp.puzzle_id
+                                    AND pp.user_id IN (SELECT id FROM users WHERE teamid = @teamId)
+                                GROUP BY p.id, p.Title
+                                ORDER BY p.id;";
                             cmd.Parameters.AddWithValue("@teamId", teamId);
                         }
                         else
@@ -279,112 +285,189 @@ namespace ScavengerHuntBackend.Controllers
         [HttpPost("submit")]
         public async Task<IActionResult> SubmitPuzzle([FromBody] Submission submission)
         {
-            // Get user information (if needed)
-            var email = CommonUtils.GetUserEmail(User);
             var userId = CommonUtils.GetUserID(User, _configuration);
             var teamId = CommonUtils.GetTeamUserID(User, _configuration);
+            var connString = _configuration.GetConnectionString("DefaultConnection");
+
             string storedHash = null;
             string message = null;
-            var connString = _configuration.GetConnectionString("DefaultConnection");
+            bool requiredForSeed = false;
+
+            // Track if this subpuzzle has been solved by ANY team yet
+            bool anyTeamHasSolvedThisSubpuzzle = false;
+            // Track if OUR team has already scored points on this subpuzzle
+            bool ourTeamAlreadyScoredThisSubpuzzle = false;
 
             using (MySqlConnection conn = new MySqlConnection(connString))
             {
                 await conn.OpenAsync();
+
+                // 1. Get puzzle details
                 using (MySqlCommand cmd = conn.CreateCommand())
                 {
-                    cmd.CommandType = CommandType.Text;
                     cmd.CommandText = @"
-                        SELECT AnswerHash, message
-                        FROM scavengerhunt.puzzlesdetails
-                        WHERE puzzleid = @puzzleId
-                          AND puzzleidorder = @subpuzzleId
-                        LIMIT 1;";
+                SELECT AnswerHash, message, requiredForSeed
+                FROM scavengerhunt.puzzlesdetails
+                WHERE puzzleid = @puzzleId
+                  AND puzzleidorder = @subpuzzleId
+                LIMIT 1;";
+
                     cmd.Parameters.AddWithValue("@puzzleId", submission.puzzleId);
                     cmd.Parameters.AddWithValue("@subpuzzleId", submission.subpuzzleId);
 
                     using (var reader = await cmd.ExecuteReaderAsync())
                     {
-                        if (await reader.ReadAsync())
-                        {
-                            storedHash = reader["AnswerHash"].ToString();
-                            message = reader["message"].ToString();
-                        }
-                        else
-                        {
+                        if (!await reader.ReadAsync())
                             return NotFound("Puzzle or sub-puzzle not found.");
-                        }
+
+                        storedHash = reader["AnswerHash"]?.ToString();
+                        message = reader["message"]?.ToString();
+                        requiredForSeed = Convert.ToBoolean(reader["requiredForSeed"]);
                     }
                 }
-            }
-            // Normalize the answer before verifying
-            var normalizedAnswer = submission.answer.Trim().ToLower();
-            submission.IsCorrect = BCrypt.Net.BCrypt.Verify(normalizedAnswer, storedHash);
 
+                // 2. Check if ANY team has already solved this subpuzzle (for first-solve bonus)
+                using (MySqlCommand cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = @"
+                SELECT EXISTS(
+                    SELECT 1 
+                    FROM puzzleprogress 
+                    WHERE puzzle_id = @puzzleId 
+                      AND puzzleidorder = @subpuzzleId 
+                      AND progress > 0
+                    LIMIT 1
+                ) AS already_solved;";
+
+                    cmd.Parameters.AddWithValue("@puzzleId", submission.puzzleId);
+                    cmd.Parameters.AddWithValue("@subpuzzleId", submission.subpuzzleId);
+
+                    anyTeamHasSolvedThisSubpuzzle = Convert.ToBoolean(await cmd.ExecuteScalarAsync());
+                }
+
+                // 3. Check if OUR team has already earned points on this subpuzzle
+                using (MySqlCommand cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = @"
+                SELECT COALESCE(SUM(progress), 0) AS team_progress
+                FROM puzzleprogress
+                WHERE puzzle_id = @puzzleId
+                  AND puzzleidorder = @subpuzzleId
+                  AND user_id IN (
+                      SELECT id FROM users WHERE teamid = @teamId
+                  );";
+
+                    cmd.Parameters.AddWithValue("@puzzleId", submission.puzzleId);
+                    cmd.Parameters.AddWithValue("@subpuzzleId", submission.subpuzzleId);
+                    cmd.Parameters.AddWithValue("@teamId", teamId);
+
+                    ourTeamAlreadyScoredThisSubpuzzle = Convert.ToInt32(await cmd.ExecuteScalarAsync()) > 0;
+                }
+            }
+
+            // 4. Verify the answer
+            var normalizedAnswer = submission.answer.Trim().ToLower();
+            submission.IsCorrect = !string.IsNullOrEmpty(storedHash) &&
+                                   BCrypt.Net.BCrypt.Verify(normalizedAnswer, storedHash);
+
+            // 5. Always record the submission
             _context.Submissions.Add(submission);
-            // If the answer is correct, insert or update the puzzleprogress table.
-            if (submission.IsCorrect)
+            //await _context.SaveChangesAsync();
+
+            // 6. Update puzzleprogress for this user
+            using (MySqlConnection conn = new MySqlConnection(connString))
+            {
+                await conn.OpenAsync();
+                using (MySqlCommand cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = @"
+            UPDATE puzzleprogress
+            SET progress = @progress,
+                is_completed = @isCompleted,
+                status = @status,
+                team_id = @team_id
+            WHERE user_id = @userId
+              AND puzzle_id = @puzzleId
+              AND puzzleidorder = @subpuzzleId;";
+
+                    int newUserProgress = 0;
+                    bool newIsCompleted = false;
+                    string newStatus = "in-progress";
+
+                    if (submission.IsCorrect)
+                    {
+                        newUserProgress = 10;
+
+                        // First-to-solve global bonus: +10
+                        if (!anyTeamHasSolvedThisSubpuzzle)
+                        {
+                            newUserProgress += 10; // Total 20
+                        }
+
+                        // Safety: if team already scored, award 0
+                        if (ourTeamAlreadyScoredThisSubpuzzle)
+                        {
+                            newUserProgress = 0;
+                        }
+
+                        newIsCompleted = true;
+                        newStatus = "completed";
+                    }
+                    else
+                    {
+                        newUserProgress = 0;
+
+                        if (!requiredForSeed)
+                        {
+                            newIsCompleted = true;
+                            newStatus = "completed";
+                        }
+                        // else: retry allowed ? stay incomplete
+                    }
+
+                    cmd.Parameters.AddWithValue("@userId", userId);
+                    cmd.Parameters.AddWithValue("@puzzleId", submission.puzzleId);
+                    cmd.Parameters.AddWithValue("@subpuzzleId", submission.subpuzzleId);
+                    cmd.Parameters.AddWithValue("@progress", newUserProgress);
+                    cmd.Parameters.AddWithValue("@isCompleted", newIsCompleted ? 1 : 0);
+                    cmd.Parameters.AddWithValue("@status", newStatus);
+                    cmd.Parameters.AddWithValue("@team_id", teamId);
+
+                    await cmd.ExecuteNonQueryAsync();
+                }
+            }
+
+            // 7. Seed unlock
+            if (submission.IsCorrect && CommonUtils.GS_internal(User, _configuration, submission.puzzleId))
             {
                 using (MySqlConnection conn = new MySqlConnection(connString))
                 {
                     await conn.OpenAsync();
                     using (MySqlCommand cmd = conn.CreateCommand())
                     {
-                        cmd.CommandText = @"
-                            UPDATE puzzleprogress AS pp
-                            SET progress = @progress +
-                                (CASE 
-                                    WHEN (
-                                        SELECT IFNULL(SUM(p.progress), 0)
-                                        FROM (SELECT * FROM puzzleprogress) AS p
-                                        WHERE p.puzzle_id = @puzzleId
-                                          AND p.puzzleidorder = @puzzleidorder
-                                          AND p.id <> pp.id
-                                    ) = 0 THEN 10 ELSE 0 END),
-                                is_completed = @is_completed,
-                                status = @status,
-                                team_id = @team_id
-                            WHERE user_id = @userId
-                              AND puzzle_id = @puzzleId
-                              AND puzzleidorder = @puzzleidorder;";
-                        cmd.Parameters.Clear();
-                        cmd.Parameters.AddWithValue("@userId", userId);
-                        cmd.Parameters.AddWithValue("@puzzleId", submission.puzzleId);
-                        cmd.Parameters.AddWithValue("@puzzleidorder", submission.subpuzzleId);
-                        cmd.Parameters.AddWithValue("@progress", 10);
-                        cmd.Parameters.AddWithValue("@is_completed", 1);
-                        cmd.Parameters.AddWithValue("@status", "completed");
-                        cmd.Parameters.AddWithValue("@team_id", teamId);
-                        await cmd.ExecuteNonQueryAsync();
-                        if(CommonUtils.GS_internal(User, _configuration, submission.puzzleId))
+                        cmd.CommandText = "SELECT seed FROM scavengerhunt.seeds WHERE puzzle_id = @id";
+                        cmd.Parameters.AddWithValue("@id", submission.puzzleId);
+
+                        var seed = await cmd.ExecuteScalarAsync();
+                        if (seed != null)
                         {
-                            string seed = null;
-                            using (MySqlCommand cmd1 = conn.CreateCommand())
-                            {
-                                cmd1.CommandType = CommandType.Text;
-                                cmd1.CommandText = "SELECT seed FROM scavengerhunt.seeds WHERE puzzle_id = @id";
-                                cmd1.Parameters.AddWithValue("@id", submission.puzzleId);
-
-                                using (var rdr1 = cmd1.ExecuteReader())
-                                {
-                                    if (rdr1.Read())
-                                    {
-                                        seed = rdr1["seed"]?.ToString();
-                                    }
-                                }
-                            }
-
-                            CommonUtils.AddNotification(User, _configuration, "You have unlocked an seed word: " + seed);
+                            CommonUtils.AddNotification(User, _configuration, "You have unlocked a seed word: " + seed);
                         }
                     }
                 }
-                return Ok(new { correct = submission.IsCorrect, message = message });
             }
 
-            //await _context.SaveChangesAsync();
+            // Optional: Tell client if they got the bonus
+            bool gotFirstSolveBonus = submission.IsCorrect && !anyTeamHasSolvedThisSubpuzzle && !ourTeamAlreadyScoredThisSubpuzzle;
 
-            return Ok(new { correct = submission.IsCorrect });
+            return Ok(new
+            {
+                correct = submission.IsCorrect,
+                message = message,
+                bonus = gotFirstSolveBonus ? 10 : 0,
+                totalPointsAwarded = gotFirstSolveBonus ? 20 : (submission.IsCorrect ? 10 : 0)
+            });
         }
-
         [HttpGet("gs/{id}")]
         public async Task<IActionResult> GS(int id)
         {
