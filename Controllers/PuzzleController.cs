@@ -292,6 +292,8 @@ namespace ScavengerHuntBackend.Controllers
             string storedHash = null;
             string message = null;
             bool requiredForSeed = false;
+            int maxSeconds = 0;
+            DateTime? startTime = null;
 
             // Track if this subpuzzle has been solved by ANY team yet
             bool anyTeamHasSolvedThisSubpuzzle = false;
@@ -302,11 +304,11 @@ namespace ScavengerHuntBackend.Controllers
             {
                 await conn.OpenAsync();
 
-                // 1. Get puzzle details
+                // 1. Get puzzle details + maxseconds for timed check
                 using (MySqlCommand cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = @"
-                SELECT AnswerHash, message, requiredForSeed
+                SELECT AnswerHash, message, requiredForSeed, maxseconds
                 FROM scavengerhunt.puzzlesdetails
                 WHERE puzzleid = @puzzleId
                   AND puzzleidorder = @subpuzzleId
@@ -323,10 +325,58 @@ namespace ScavengerHuntBackend.Controllers
                         storedHash = reader["AnswerHash"]?.ToString();
                         message = reader["message"]?.ToString();
                         requiredForSeed = Convert.ToBoolean(reader["requiredForSeed"]);
+                        maxSeconds = reader.IsDBNull("maxseconds") ? 0 : reader.GetInt32("maxseconds");
                     }
                 }
 
-                // 2. Check if ANY team has already solved this subpuzzle (for first-solve bonus)
+                // 2. If this is a timed question, check starttime and enforce time limit
+                if (maxSeconds > 0)
+                {
+                    using (var cmd = conn.CreateCommand())
+                    {
+                        cmd.CommandText = @"
+                    SELECT starttime 
+                    FROM scavengerhunt.puzzleprogress 
+                    WHERE user_id = @userId 
+                      AND puzzle_id = @puzzleId 
+                      AND puzzleidorder = @subpuzzleId 
+                    LIMIT 1";
+
+                        cmd.Parameters.AddWithValue("@userId", userId);
+                        cmd.Parameters.AddWithValue("@puzzleId", submission.puzzleId);
+                        cmd.Parameters.AddWithValue("@subpuzzleId", submission.subpuzzleId);
+
+                        var result = await cmd.ExecuteScalarAsync();
+                        if (result != null && !result.ToString().Equals(""))
+                        {
+                            startTime = Convert.ToDateTime(result);
+                            var expiresAt = startTime.Value.AddSeconds(maxSeconds + 5); // Give 5-second grace period to maxseconds for latency issues.
+                            var now = DateTime.UtcNow;
+
+                            if (now > expiresAt)
+                            {
+                                return Ok(new
+                                {
+                                    correct = false,
+                                    message = "Time expired! Your answer was submitted too late.",
+                                    timeExpired = true
+                                });
+                            }
+                        }
+                        else
+                        {
+                            // No starttime ? they never unlocked ? reject
+                            return Ok(new
+                            {
+                                correct = false,
+                                message = "You must unlock the question first before answering.",
+                                timeExpired = false
+                            });
+                        }
+                    }
+                }
+
+                // 3. Check if ANY team has already solved this subpuzzle (for first-solve bonus)
                 using (MySqlCommand cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = @"
@@ -345,7 +395,7 @@ namespace ScavengerHuntBackend.Controllers
                     anyTeamHasSolvedThisSubpuzzle = Convert.ToBoolean(await cmd.ExecuteScalarAsync());
                 }
 
-                // 3. Check if OUR team has already earned points on this subpuzzle
+                // 4. Check if OUR team has already earned points on this subpuzzle
                 using (MySqlCommand cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = @"
@@ -365,30 +415,29 @@ namespace ScavengerHuntBackend.Controllers
                 }
             }
 
-            // 4. Verify the answer
+            // 5. Verify the answer
             var normalizedAnswer = submission.answer.Trim().ToLower();
             submission.IsCorrect = !string.IsNullOrEmpty(storedHash) &&
                                    BCrypt.Net.BCrypt.Verify(normalizedAnswer, storedHash);
 
-            // 5. Always record the submission
+            // 6. Always record the submission (for audit)
             _context.Submissions.Add(submission);
-            //await _context.SaveChangesAsync();
 
-            // 6. Update puzzleprogress for this user
+            // 7. Update puzzleprogress for this user
             using (MySqlConnection conn = new MySqlConnection(connString))
             {
                 await conn.OpenAsync();
                 using (MySqlCommand cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = @"
-            UPDATE puzzleprogress
-            SET progress = @progress,
-                is_completed = @isCompleted,
-                status = @status,
-                team_id = @team_id
-            WHERE user_id = @userId
-              AND puzzle_id = @puzzleId
-              AND puzzleidorder = @subpuzzleId;";
+                UPDATE puzzleprogress
+                SET progress = @progress,
+                    is_completed = @isCompleted,
+                    status = @status,
+                    team_id = @team_id
+                WHERE user_id = @userId
+                  AND puzzle_id = @puzzleId
+                  AND puzzleidorder = @subpuzzleId;";
 
                     int newUserProgress = 0;
                     bool newIsCompleted = false;
@@ -437,7 +486,7 @@ namespace ScavengerHuntBackend.Controllers
                 }
             }
 
-            // 7. Seed unlock
+            // 8. Seed unlock
             if (submission.IsCorrect && CommonUtils.GS_internal(User, _configuration, submission.puzzleId))
             {
                 using (MySqlConnection conn = new MySqlConnection(connString))
@@ -468,6 +517,7 @@ namespace ScavengerHuntBackend.Controllers
                 totalPointsAwarded = gotFirstSolveBonus ? 20 : (submission.IsCorrect ? 10 : 0)
             });
         }
+
         [HttpGet("gs/{id}")]
         public async Task<IActionResult> GS(int id)
         {
@@ -571,7 +621,270 @@ namespace ScavengerHuntBackend.Controllers
             }
         }
 
+        // ---------------------------------------------------------------------------
+        // PUZZLE TIMER SYSTEM (SERVER-ENFORCED)
+        // ---------------------------------------------------------------------------
 
+        /// <summary>
+        /// POST /api/puzzle/timer/start
+        /// Called when player taps "Unlock Now!" on a timed trivia question
+        /// Records the exact start time on the server
+        /// </summary>
+        /// <summary>
+        /// POST /api/puzzle/timer/start
+        /// Called when player taps "Unlock Now!" on a timed trivia question
+        /// Records the start time in puzzleprogress.starttime
+        /// </summary>
+        /// <summary>
+        /// POST /api/puzzle/timer/start
+        /// Called when player taps "Unlock Now!" on a timed trivia question
+        /// Sets starttime ONLY if currently NULL
+        /// </summary>
+        [HttpPost("start")]
+        public async Task<IActionResult> StartPuzzleTimer([FromBody] TimerRequest request)
+        {
+            if (request == null || request.puzzleId <= 0 || request.subpuzzleId <= 0)
+                return BadRequest(new { success = false, message = "Invalid request." });
+
+            var userId = CommonUtils.GetUserID(User, _configuration);
+            var connString = _configuration.GetConnectionString("DefaultConnection");
+
+            try
+            {
+                using (var conn = new MySqlConnection(connString))
+                {
+                    await conn.OpenAsync();
+
+                    // 1. Validate this is a timed trivia question (type = 1 and maxseconds > 0)
+                    int maxSeconds = 0;
+                    using (var cmd = conn.CreateCommand())
+                    {
+                        cmd.CommandText = @"
+                    SELECT maxseconds 
+                    FROM scavengerhunt.puzzlesdetails 
+                    WHERE puzzleid = @puzzleId 
+                      AND puzzleidorder = @subpuzzleId 
+                      AND type = 1
+                    LIMIT 1";
+
+                        cmd.Parameters.AddWithValue("@puzzleId", request.puzzleId);
+                        cmd.Parameters.AddWithValue("@subpuzzleId", request.subpuzzleId);
+
+                        var result = await cmd.ExecuteScalarAsync();
+                        if (result == null || !int.TryParse(result.ToString(), out maxSeconds) || maxSeconds <= 0)
+                        {
+                            return BadRequest(new { success = false, message = "This question is not a timed trivia question." });
+                        }
+                    }
+
+                    // 2. Check current progress record
+                    DateTime? startTime = null;
+                    bool hasAnswered = false;
+
+                    using (var cmd = conn.CreateCommand())
+                    {
+                        cmd.CommandText = @"
+                    SELECT starttime, is_completed 
+                    FROM scavengerhunt.puzzleprogress 
+                    WHERE user_id = @userId 
+                      AND puzzle_id = @puzzleId 
+                      AND puzzleidorder = @subpuzzleId 
+                    LIMIT 1";
+
+                        cmd.Parameters.AddWithValue("@userId", userId);
+                        cmd.Parameters.AddWithValue("@puzzleId", request.puzzleId);
+                        cmd.Parameters.AddWithValue("@subpuzzleId", request.subpuzzleId);
+
+                        using (var reader = await cmd.ExecuteReaderAsync())
+                        {
+                            if (await reader.ReadAsync())
+                            {
+                                startTime = reader.IsDBNull("starttime") ? (DateTime?)null : reader.GetDateTime("starttime");
+                                hasAnswered = reader.GetBoolean("is_completed");
+                            }
+                        }
+                    }
+
+                    // 3. If already answered ? block
+                    if (hasAnswered)
+                    {
+                        return Ok(new
+                        {
+                            success = false,
+                            reason = "already_answered",
+                            message = "You've already answered this question."
+                        });
+                    }
+
+                    // 4. If already started ? check if time expired
+                    if (startTime.HasValue)
+                    {
+                        var expiresAt = startTime.Value.AddSeconds(maxSeconds);
+                        var now = DateTime.UtcNow;
+
+                        if (now > expiresAt)
+                        {
+                            return Ok(new
+                            {
+                                success = false,
+                                reason = "time_expired",
+                                message = "Time has already expired for this question."
+                            });
+                        }
+
+                        // Still active — return current state (do NOT restart timer)
+                        return Ok(new
+                        {
+                            success = false,
+                            reason = "already_started",
+                            message = "You've already unlocked this question.",
+                            startTime = startTime.Value.ToString("o"),
+                            expiresAt = expiresAt.ToString("o"),
+                            timeRemaining = Math.Max(0, (int)(expiresAt - now).TotalSeconds)
+                        });
+                    }
+
+                    // 5. First time unlocking ? set starttime ONLY if currently NULL
+                    using (var cmd = conn.CreateCommand())
+                    {
+                        cmd.CommandText = @"
+                    UPDATE scavengerhunt.puzzleprogress 
+                    SET starttime = UTC_TIMESTAMP(),
+                        status = 'in-progress'
+                    WHERE user_id = @userId 
+                      AND puzzle_id = @puzzleId 
+                      AND puzzleidorder = @subpuzzleId 
+                      AND starttime IS NULL";
+
+                        cmd.Parameters.AddWithValue("@userId", userId);
+                        cmd.Parameters.AddWithValue("@puzzleId", request.puzzleId);
+                        cmd.Parameters.AddWithValue("@subpuzzleId", request.subpuzzleId);
+
+                        var rowsAffected = await cmd.ExecuteNonQueryAsync();
+
+                        // If no row was updated, it means starttime was already set (or record doesn't exist)
+                        // But we assume record exists — if not, we should insert one
+                        if (rowsAffected == 0)
+                        {
+
+                        }
+                    }
+
+                    var newStartTime = DateTime.UtcNow;
+                    var newExpiresAt = newStartTime.AddSeconds(maxSeconds);
+
+                    return Ok(new
+                    {
+                        success = true,
+                        startTime = newStartTime.ToString("o"),
+                        expiresAt = newExpiresAt.ToString("o"),
+                        maxSeconds = maxSeconds,
+                        timeRemaining = maxSeconds
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { success = false, message = "Server error: " + ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// POST /api/puzzle/timer/status
+        /// Called on puzzle load to get current timer state for a question
+        /// </summary>
+        [HttpPost("timer/status")]
+        public async Task<IActionResult> GetPuzzleTimerStatus([FromBody] TimerRequest request)
+        {
+            if (request == null || request.puzzleId <= 0 || request.subpuzzleId <= 0)
+                return Ok(new
+                {
+                    hasStarted = false,
+                    timeRemaining = 0,
+                    hasAnswered = false,
+                    wasCorrect = (bool?)null
+                });
+
+            var userId = CommonUtils.GetUserID(User, _configuration);
+            var connString = _configuration.GetConnectionString("DefaultConnection");
+
+            try
+            {
+                using (var conn = new MySqlConnection(connString))
+                {
+                    await conn.OpenAsync();
+
+                    // Get timer record
+                    using (var cmd = conn.CreateCommand())
+                    {
+                        cmd.CommandText = @"
+                    SELECT t.started_at, t.max_seconds, pp.is_completed, pp.progress > 0 AS was_correct
+                    FROM scavengerhunt.trivia_timer t
+                    LEFT JOIN scavengerhunt.puzzleprogress pp
+                        ON pp.user_id = t.user_id
+                        AND pp.puzzle_id = t.puzzle_id
+                        AND pp.puzzleidorder = t.subpuzzle_id
+                    WHERE t.user_id = @userId
+                      AND t.puzzle_id = @puzzleId
+                      AND t.subpuzzle_id = @subpuzzleId
+                    LIMIT 1";
+
+                        cmd.Parameters.AddWithValue("@userId", userId);
+                        cmd.Parameters.AddWithValue("@puzzleId", request.puzzleId);
+                        cmd.Parameters.AddWithValue("@subpuzzleId", request.subpuzzleId);
+
+                        using (var reader = await cmd.ExecuteReaderAsync())
+                        {
+                            if (await reader.ReadAsync())
+                            {
+                                var startedAt = reader.GetDateTime("started_at");
+                                var maxSeconds = reader.GetInt32("max_seconds");
+                                var isCompleted = !reader.IsDBNull("is_completed") && reader.GetBoolean("is_completed");
+                                var wasCorrect = !reader.IsDBNull("was_correct") && reader.GetBoolean("was_correct");
+
+                                var expiresAt = startedAt.AddSeconds(maxSeconds);
+                                var now = DateTime.UtcNow;
+                                var timeRemaining = Math.Max(0, (int)(expiresAt - now).TotalSeconds);
+
+                                bool timeExpired = now > expiresAt;
+
+                                return Ok(new
+                                {
+                                    hasStarted = true,
+                                    startTime = startedAt.ToString("o"),
+                                    expiresAt = expiresAt.ToString("o"),
+                                    maxSeconds = maxSeconds,
+                                    timeRemaining = timeRemaining,
+                                    timeExpired = timeExpired,
+                                    hasAnswered = isCompleted,
+                                    wasCorrect = isCompleted ? wasCorrect : (bool?)null
+                                });
+                            }
+                        }
+                    }
+
+                    // No record ? not started
+                    return Ok(new
+                    {
+                        hasStarted = false,
+                        timeRemaining = 0,
+                        hasAnswered = false,
+                        wasCorrect = (bool?)null
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { success = false, message = "Server error: " + ex.Message });
+            }
+        }
+
+        // Helper model for timer requests
+        public class TimerRequest
+        {
+            public int puzzleId { get; set; }
+            public int subpuzzleId { get; set; }
+        }
 
 
     }
