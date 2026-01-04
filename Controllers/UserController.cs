@@ -55,7 +55,7 @@ namespace ScavengerHuntBackend.Controllers
                     SELECT 
                         Id, Email, Name, Username, Bio, 
                         PuzzlesCompleted, GlobalRank, TotalScore, 
-                        TeamId, Team
+                        TeamId, Team, role
                     FROM users 
                     WHERE Email = @Email
                     LIMIT 1;";
@@ -94,7 +94,11 @@ namespace ScavengerHuntBackend.Controllers
 
                                 Team = reader["Team"] != DBNull.Value
                                     ? reader.GetString("Team")
-                                    : null
+                                    : null,
+
+                                Role = reader["Role"] != DBNull.Value
+                                    ? reader.GetInt32("Role")
+                                    : (int?)null,
                             };
 
                             return Ok(new { success = true, user });
